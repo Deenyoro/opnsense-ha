@@ -40,6 +40,23 @@ Two smaller boot hooks, use if they apply:
 Gateways and gateway groups, system tunables, `rc.syshook.d` hooks, Suricata,
 CrowdSec, Tailscale, interface settings. `install.sh` covers the hook/script part.
 
+## Contents
+
+| Path | Purpose |
+|---|---|
+| `files/usr/local/sbin/kc-ha-lib` | shared helpers: reads `kc-ha.conf` + `config.xml` (reference VIP by vhid, its device, pfsync peer, upstream gateways with devices), role, uptime, peer-alive, boot-grace gate |
+| `kc-ha-egress` | default route / backup egress (above) |
+| `kc-unbound-master` | Unbound restart on a trusted MASTER event |
+| `kc-ha-master-services` | start/stop `MASTER_ONLY_SERVICES` by role (carp hook, boot, cron every 2 min) |
+| `kc-ha-status` | one-screen status of a node (`--kv` for scripts) |
+| `files/usr/local/etc/kc-ha.conf.sample` | site settings: `VHID`, `BOOT_GRACE`, `MASTER_ONLY_SERVICES`; copied to `kc-ha.conf` once |
+| `install.sh` | idempotent install of plugin + files + version stamp, then live apply and status |
+| `check.sh` | acceptance test of the pair (below) |
+| `drill.sh` | controlled failover/failback with probes of existing flows |
+
+Nothing is hardcoded per node: the same files are installed unchanged on every node of
+every site; only `kc-ha.conf` (identical on both nodes) carries site choices.
+
 ## Install / re-apply / verify
 
 ```sh
@@ -55,11 +72,22 @@ sync, which demotes CARP for ~1 s and makes a MASTER hand over and preempt back)
 script refuses to change it live on a MASTER and leaves it for the next reboot. That is
 why the backup node goes first.
 
-`check.sh` is the acceptance test: plugin version, every file byte-identical to the repo,
-keeper running with a fresh heartbeat, pfsync `syncok` + `maxupd 8`, CARP demotion 0,
-one MASTER per VIP, backup-egress routes present only on the BACKUP, a real default route,
-VLAN 12 MTU 9000, Kea HA in touch, gateway flags (upstream / priority / kill-states off)
-identical on both nodes. Exit 0 = good.
+`check.sh` is the acceptance test. Per node: kc-ha version stamp, plugin version, every
+file byte-identical to the repo, keeper running with a fresh heartbeat, pfsync `syncok` +
+`maxupd 8`, CARP demotion 0 / preempt on / not in maintenance mode, peer answering on the
+SYNC link, `proto carp` pass rules loaded, no "master timed out" in today's log, one role
+per node, backup-egress routes only on the BACKUP, default route on a real gateway **and
+on that gateway's WAN device**, no kill-states on gateways, wan interface gateway set, Kea
+HA in touch. Pair: interface **device names**, interface gateways, gateways, VIPs (minus
+skew), tunables, hasync items, hook directories and `kc-ha.conf` identical; same OPNsense
+version; same loaded rule/NAT counts; state tables within 20%; exactly one MASTER.
+Exit 0 = good. `KC_HA_NO_PLUGIN=1` for a site without the DHCP-WAN plugin.
+
+`drill.sh root@<master> root@<backup> [hold]` pre-flights both nodes, probes an existing
+ping flow, DNS at the VIP and one persistent HTTPS connection from the workstation, demotes
+the master **detached on the node** (so it fails back by itself even if you lose it), and
+reports losses per phase plus the hook log lines. Expect 0-1 lost pings and 0 DNS/HTTPS
+failures.
 
 ### After an OPNsense update
 
@@ -81,6 +109,20 @@ Edit before use on another site: `VHID` (default 12, the LAN-side CARP VIP the b
 reaches the master through) in `kc-ha-egress` (or set `KC_HA_VHID`) and `VIP_IF`/`VHID` in
 `kc-unbound-master`; `97-kc-jumbo-mtu` names the jumbo interfaces.
 
+## Boot-time false MASTER (known, partly mitigated)
+
+A node that boots while the peer is healthy can time out to MASTER on its VLAN VIPs for
+~30 s before it is able to hear the real master (seen in the field on 26.1: the pf
+ruleset is not fully loaded yet; demotion does not prevent a timeout). During that window
+both nodes are MASTER and clients that learn the booting node's MAC lose connectivity.
+
+Mitigation in this kit: a MASTER event within `BOOT_GRACE` seconds of boot while the pfsync
+peer still answers on the SYNC link is treated as false by `kc-unbound-master` and
+`kc-ha-master-services` (no restart, no service start). `kc-ha-egress` still acts (removing
+the backup-egress routes on a false master is harmless and they come back on the BACKUP
+event). `check.sh` warns on "master timed out" in the log. Prefer rebooting a node while the
+*other* one is master and expect a short blip; test it in a window before relying on it.
+
 ## Failover test
 
 ```sh
@@ -88,6 +130,47 @@ sysctl net.inet.carp.demotion=240     # on the master: hand over
 # ... probe ping / DNS / a WAN-bound service from the LAN ...
 sysctl net.inet.carp.demotion=-240    # relative counter: undo with the negative, not 0
 ```
+
+## Field notes from a second site (conversion of a live single firewall, 3 static WANs)
+
+- **Device names must match on both nodes** for every WAN: synced states carry
+  `route-to <gw>@<device>` (pfsync 1400+). With WAN2 on `vtnet1` on one node and `vtnet2`
+  on the other, every established connection stalled for the whole failover while ping/DNS
+  to the VIP looked fine. `check.sh` fails on differing device names.
+- **Converting a live gateway to a CARP VIP**, per interface on the primary: change the
+  interface address `.1` → `.2`, add CARP VIP `.1` (skew 0), `configctl interface
+  reconfigure <opt>`, `configctl filter reload`. ~3 s in BACKUP then MASTER; routed traffic
+  keeps flowing. Add the secondary's VIP only after the primary is MASTER, or the
+  secondary times out to MASTER and duplicates the address.
+- **After the first VIP, reload the filter**: `interface reconfigure` alone does not add the
+  automatic `pass proto carp` rules; without them the node drops the peer's advertisements
+  and both stay MASTER. `check.sh` counts those rules.
+- **Reconfiguring an interface or pfsync on the master demotes it** (pfsync bulk start,
+  factor 240) until "bulk done": a ~1 s handover and back when both nodes run the same
+  version. With mismatched versions the bulk handshake can stall (`syncok: 0`, no "bulk
+  done"); the node stays demoted and the peer takes over. Clear with
+  `sysctl net.inet.carp.demotion=-240`, or set `net.pfsync.carp_demotion_factor=0` for the
+  duration of a conversion. `syncok` alone is not a health signal: compare state counts.
+- **Outbound NAT in hybrid/automatic mode** translates to the interface address, which
+  becomes the private /29 node address: add a manual rule per WAN to the VIP **before**
+  converting the interface. Rules using the `<if>ip` macro change meaning the same way.
+- `configctl filter reload` does not trigger config sync; run
+  `/usr/local/etc/rc.filter_synchronize` after CLI changes on the primary.
+- sshd keeps listening only on the addresses present when it started; restart it after
+  the conversion. Keep an out-of-band path (Proxmox guest agent) for `sysctl` on a node
+  whose addresses just moved.
+- Hot-added Proxmox virtio NICs enumerate in arrival order until a cold boot: verify
+  device-to-MAC after a power cycle before relying on names.
+- ISC DHCP failover needs tcp 519-520 allowed between the node addresses on each VLAN;
+  role follows the VIP skew. Config sync of `dhcpd` and `virtualip` is safe.
+- WireGuard: set `carp_depend_on` through the model (VIP UUID); the first sync may deliver
+  it empty (VIP UUIDs not yet present), sync twice; run `configctl template reload
+  OPNsense/Wireguard` on the secondary or `wg0.conf` stays empty; add a static-port
+  outbound NAT rule for the tunnel port.
+- Tailscale: with both nodes advertising the same subnets, the control plane may pick the
+  backup as the active subnet router.
+- Services that must run on one node only (mDNS/SSDP relay, ddclient): list them in
+  `MASTER_ONLY_SERVICES` in `kc-ha.conf`.
 
 ## Adding a WAN
 

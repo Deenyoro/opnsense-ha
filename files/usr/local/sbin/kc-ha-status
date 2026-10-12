@@ -1,0 +1,33 @@
+#!/bin/sh
+# One-screen HA status of this node. Machine-readable with --kv.
+. /usr/local/sbin/kc-ha-lib
+kc_ha_load
+role=$(kc_ha_role)
+carp=$(/sbin/ifconfig | awk '/carp:/ {printf "%s:%s ", $4, $2}')
+nm=$(printf '%s' "$carp" | grep -o MASTER | wc -l | tr -d ' '); nb=$(printf '%s' "$carp" | grep -o BACKUP | wc -l | tr -d ' ')
+def=$(/usr/bin/netstat -rn -f inet | awk '$1=="default"{print $2"@"$4; exit}')
+egress=$(/usr/bin/netstat -rn -f inet | awk '$1=="0.0.0.0/1"||$1=="128.0.0.0/1"{printf "%s>%s ", $1, $2}')
+pfs=$(/sbin/ifconfig pfsync0 2>/dev/null | awk '/syncok/ {s=$2} /maxupd/ {for(i=1;i<=NF;i++) if($i=="maxupd:") m=$(i+1); for(i=1;i<=NF;i++) if($i=="version:") v=$(i+1)} END {printf "syncok=%s maxupd=%s version=%s", s, m, v}')
+states=$(/sbin/pfctl -si 2>/dev/null | awk '/current entries/ {print $3}')
+dem=$(/sbin/sysctl -n net.inet.carp.demotion); pre=$(/sbin/sysctl -n net.inet.carp.preempt); pdf=$(/sbin/sysctl -n net.pfsync.carp_demotion_factor)
+maint=$(grep -c '<carp_maintenance' /conf/config.xml 2>/dev/null)
+peer=down; kc_ha_peer_alive && peer=alive
+gwst=$(for g in $GWS; do /sbin/ping -q -c 1 -W 500 "${g%@*}" >/dev/null 2>&1 && printf '%s:up ' "${g%@*}" || printf '%s:noping ' "${g%@*}"; done)
+svcs=$(for s in $MASTER_ONLY_SERVICES; do case "$(/usr/local/sbin/pluginctl -s "$s" status 2>/dev/null)" in *"is running"*) printf '%s:running ' "$s" ;; *) printf '%s:stopped ' "$s" ;; esac; done)
+keeper=$(/usr/local/etc/rc.d/carpvipdhcp status 2>/dev/null | head -1)
+ver=$(cat /usr/local/etc/kc-ha.version 2>/dev/null)
+if [ "$1" = "--kv" ]; then
+    printf 'host=%s\nrole=%s\nmasters=%s\nbackups=%s\ndemotion=%s\npreempt=%s\npfsync_demotion_factor=%s\nmaintenance=%s\npfsync=%s\nstates=%s\ndefault=%s\negress=%s\npeer=%s\nuptime=%s\ngateways=%s\nservices=%s\nkeeper=%s\nversion=%s\n' \
+        "$(hostname)" "$role" "$nm" "$nb" "$dem" "$pre" "$pdf" "$maint" "$pfs" "$states" "$def" "$egress" "$peer" "$(kc_ha_uptime)" "$gwst" "$svcs" "$keeper" "$ver"
+    exit 0
+fi
+cat <<EOT
+$(hostname)  kc-ha ${ver:-unversioned}  up $(kc_ha_uptime)s
+  role (vhid $VHID on $IF, VIP $VIP): ${role:-none}   VIPs: $nm MASTER / $nb BACKUP
+  carp: demotion=$dem preempt=$pre pfsync_demotion_factor=$pdf maintenance_mode=$maint
+  pfsync: $pfs   states: $states   peer $PEER: $peer
+  default route: ${def:-none}   backup egress: ${egress:-none}
+  upstream gateways: ${gwst:-none}
+  master-only services: ${svcs:-none configured}
+  carp-vip-dhcp: ${keeper:-not installed}
+EOT

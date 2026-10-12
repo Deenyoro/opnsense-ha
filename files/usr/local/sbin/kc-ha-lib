@@ -1,0 +1,54 @@
+#!/bin/sh
+# Shared helpers for the kc-ha scripts. Source it: . /usr/local/sbin/kc-ha-lib
+# Everything is read from /conf/config.xml and /usr/local/etc/kc-ha.conf, so the
+# same files work unchanged on every node of every site.
+VHID=12; BOOT_GRACE=120; MASTER_ONLY_SERVICES=""
+[ -r /usr/local/etc/kc-ha.conf ] && . /usr/local/etc/kc-ha.conf
+VHID=${KC_HA_VHID:-$VHID}
+
+# Sets: VIP IF (the reference CARP VIP and its device), PEER (pfsync peer IP),
+# GWS ("gw@device ..." upstream IPv4 gateways, best priority first).
+kc_ha_load() {
+    eval "$(/usr/local/bin/python3 - "$VHID" <<'PY'
+import sys, xml.etree.ElementTree as ET
+vhid = sys.argv[1]
+r = ET.parse('/conf/config.xml').getroot()
+ifmap = {i.tag: (i.findtext('if') or '') for i in r.find('interfaces')}
+vip = next((v for v in r.find('virtualip').iter('vip')
+            if v.findtext('mode') == 'carp' and v.findtext('vhid') == vhid), None) if r.find('virtualip') is not None else None
+print('VIP=%s' % (vip.findtext('subnet') if vip is not None else ''))
+print('IF=%s' % (ifmap.get(vip.findtext('interface'), '') if vip is not None else ''))
+print('PEER=%s' % (r.findtext('hasync/pfsyncpeerip') or ''))
+gws = []
+for it in r.find('OPNsense/Gateways').iter('gateway_item'):
+    g = lambda k, d='': (it.findtext(k) or d)
+    if g('disabled', '0') == '1' or g('force_down', '0') == '1' or g('defaultgw', '0') != '1':
+        continue
+    if g('ipprotocol', 'inet') != 'inet' or not g('gateway') or g('gateway') == 'dynamic':
+        continue
+    gws.append((int(g('priority', '255') or 255), g('gateway'), ifmap.get(g('interface'), '')))
+gws.sort()
+print('GWS="%s"' % ' '.join('%s@%s' % (x[1], x[2]) for x in gws))
+PY
+)"
+}
+
+# CARP role of the reference VIP: MASTER, BACKUP, INIT or empty.
+kc_ha_role() { /sbin/ifconfig "$IF" 2>/dev/null | awk -v v="vhid $VHID" '$0 ~ "carp: [A-Z]+ " v {print $2; exit}'; }
+
+kc_ha_uptime() { echo $(( $(date +%s) - $(/sbin/sysctl -n kern.boottime | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p') )); }
+
+# 0 if the pfsync peer answers on the SYNC link (two quick pings).
+kc_ha_peer_alive() {
+    [ -n "$PEER" ] || return 1
+    /sbin/ping -q -c 1 -W 500 "$PEER" >/dev/null 2>&1 || /sbin/ping -q -c 1 -W 500 "$PEER" >/dev/null 2>&1
+}
+
+# A MASTER role we should act on: not within BOOT_GRACE of boot while the peer
+# is still alive (then it is most likely the boot-time false master).
+kc_ha_master_trusted() {
+    [ "$(kc_ha_role)" = MASTER ] || return 1
+    [ "$(kc_ha_uptime)" -ge "$BOOT_GRACE" ] && return 0
+    kc_ha_peer_alive && return 1
+    return 0
+}

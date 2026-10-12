@@ -1,0 +1,2 @@
+# kc-ha: reconcile master-only services (OPNsense restarts services on reconfigure regardless of CARP role)
+*/2 * * * * root /usr/local/sbin/kc-ha-master-services

@@ -1,0 +1,17 @@
+# kc-ha site settings. Copied to /usr/local/etc/kc-ha.conf by install.sh if that
+# file does not exist yet (it is never overwritten). Same content on both nodes.
+
+# vhid of the LAN-side CARP VIP that defines "the role of this node" and that
+# the BACKUP node reaches the master through (its VIP and device are looked up
+# in config.xml, so nothing else is hardcoded).
+VHID=12
+
+# Seconds after boot during which a MASTER event is not trusted while the peer
+# still answers on the SYNC link: a booting node can time out to MASTER before
+# it is able to hear the real master (seen in the field: ~30 s dual master).
+BOOT_GRACE=120
+
+# Services that must run on exactly one node (the master), space separated.
+# Started on MASTER, stopped otherwise, by kc-ha-master-services. Names as
+# accepted by `pluginctl -s <name> status`, e.g. "udpbroadcastrelay ddclient".
+MASTER_ONLY_SERVICES=""

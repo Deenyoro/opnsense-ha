@@ -1,0 +1,27 @@
+#!/bin/sh
+# KC HA: services that must run on exactly one node (MASTER_ONLY_SERVICES in
+# kc-ha.conf, e.g. udpbroadcastrelay or ddclient): started on the master,
+# stopped elsewhere. OPNsense restarts services on reconfigure regardless of
+# role, so this also runs from cron. Boot-time false MASTER events are ignored
+# (kc_ha_master_trusted). Idempotent; a stop/start is logged (kc-ha-services).
+. /usr/local/sbin/kc-ha-lib
+[ -n "$MASTER_ONLY_SERVICES" ] || exit 0
+kc_ha_load
+[ -n "$IF" ] || exit 0
+role=$(kc_ha_role)
+want=stopped
+if [ "$role" = MASTER ]; then
+    if kc_ha_master_trusted; then want=running; else exit 0; fi
+fi
+for svc in $MASTER_ONLY_SERVICES; do
+    case "$(/usr/local/sbin/pluginctl -s "$svc" status 2>/dev/null)" in
+        *"is running"*) is=running ;; *) is=stopped ;;
+    esac
+    [ "$is" = "$want" ] && continue
+    if [ "$want" = running ]; then
+        /usr/local/sbin/pluginctl -s "$svc" start >/dev/null 2>&1 && logger -t kc-ha-services "MASTER: started $svc"
+    else
+        /usr/local/sbin/pluginctl -s "$svc" stop >/dev/null 2>&1 && logger -t kc-ha-services "${role:-no-carp}: stopped $svc"
+    fi
+done
+exit 0

@@ -9,62 +9,46 @@
 # reachable upstream gateway on both roles; OPNsense re-evaluates it as soon as
 # the monitors come up and keeps failing over between WANs on its own.
 #
-# Upstream candidates come from the config: enabled, upstream ("defaultgw"),
-# IPv4 gateways ordered by priority (lowest number first). On MASTER the first
-# one that answers a ping is used (so a dead primary WAN does not get pinned);
-# on BACKUP nothing can be probed, so the first by priority is used - its
-# 0/1 + 128/1 routes via the master's VIP take precedence anyway.
-# Adding WAN3/WAN4 needs no change here: mark the gateway upstream, give it a
-# priority.
+# Upstream candidates come from the config (kc-ha-lib): enabled, upstream
+# IPv4 gateways by priority. On MASTER the first one that answers a ping is
+# used, so a dead primary WAN is not pinned during a takeover; on BACKUP nothing
+# can be probed, so the first by priority is used - its 0/1 + 128/1 routes via
+# the master's VIP take precedence anyway. Adding WAN3/WAN4 needs no change
+# here: mark the gateway upstream, give it a priority.
+#
+# The default route is bound to the gateway's WAN device via a host route. With
+# node addresses from a private /29 the gateway is off-link, and a bare
+# `route add default` issued while the /1 routes exist resolves through them and
+# lands on the LAN device (field report 2026-10-12: black hole after takeover).
+# A default route on the wrong device is therefore re-pinned too.
 #
 # BACKUP: additionally route 0/1 + 128/1 via the master's LAN VIP so this
 # node's own traffic (updates, CrowdSec, NTP) works; removed on MASTER.
-#
-# The LAN VIP is the CARP VIP with vhid $VHID (looked up in the config).
 # Reads the real CARP role rather than trusting hook arguments. Idempotent.
 # Serialised with lockf: one CARP transition fires this once per VIP.
 #
 # Usage: kc-ha-egress [--dry-run|--show]
-VHID=${KC_HA_VHID:-12}
 LOCK=/var/run/kc-ha-egress.lock
 DRY=0; case "$1" in --dry-run|--show) DRY=1 ;; esac
 if [ "$DRY" = 0 ] && [ -z "$KC_HA_LOCKED" ]; then
     KC_HA_LOCKED=1 exec /usr/bin/lockf -t 30 "$LOCK" /bin/sh "$0" "$@"
 fi
+. /usr/local/sbin/kc-ha-lib
 log() { [ "$DRY" = 1 ] && echo "$*" || /usr/bin/logger -t kc-ha-egress "$*"; }
 run() { [ "$DRY" = 1 ] && echo "+ $*" || "$@"; }
 
-eval "$(/usr/local/bin/python3 - "$VHID" <<'PY'
-import sys, xml.etree.ElementTree as ET
-vhid = sys.argv[1]
-r = ET.parse('/conf/config.xml').getroot()
-ifmap = {i.tag: (i.findtext('if') or '') for i in r.find('interfaces')}
-vip = next((v for v in r.find('virtualip').iter('vip')
-            if v.findtext('mode') == 'carp' and v.findtext('vhid') == vhid), None)
-print('VIP=%s' % (vip.findtext('subnet') if vip is not None else ''))
-print('IF=%s' % (ifmap.get(vip.findtext('interface'), '') if vip is not None else ''))
-gws = []
-for it in r.find('OPNsense/Gateways').iter('gateway_item'):
-    g = lambda k, d='': (it.findtext(k) or d)
-    if g('disabled', '0') == '1' or g('force_down', '0') == '1' or g('defaultgw', '0') != '1':
-        continue
-    if g('ipprotocol', 'inet') != 'inet' or not g('gateway') or g('gateway') == 'dynamic':
-        continue
-    gws.append((int(g('priority', '255') or 255), g('gateway'), g('name')))
-gws.sort()
-print('GWS="%s"' % ' '.join(x[1] for x in gws))
-PY
-)"
+kc_ha_load
 if [ -z "$VIP" ] || [ -z "$IF" ]; then
     log "no CARP VIP with vhid $VHID in config; nothing to do"; exit 0
 fi
-
-role=$(/sbin/ifconfig "$IF" 2>/dev/null | awk -v v="vhid $VHID" '$0 ~ "carp: [A-Z]+ " v {print $2; exit}')
+role=$(kc_ha_role)
 have=$(/usr/bin/netstat -rn -f inet | awk '$1=="0.0.0.0/1"||$1=="128.0.0.0/1"' | wc -l | tr -d ' ')
 curdef=${KC_HA_TEST_DEF-$(/usr/bin/netstat -rn -f inet | awk '$1=="default"{print $2; exit}')}   # KC_HA_TEST_DEF: test hook for --dry-run
+curdev=${KC_HA_TEST_DEV-$(/usr/bin/netstat -rn -f inet | awk '$1=="default"{print $4; exit}')}
+
 if [ "$1" = "--show" ]; then
-    echo "role=$role vip=$VIP if=$IF vhid=$VHID egress_routes=$have default=${curdef:-none} upstream_by_priority=[$GWS]"
-    for gw in $GWS; do /sbin/ping -q -c 1 -W 700 "$gw" >/dev/null 2>&1 && echo "  $gw answers ping" || echo "  $gw no ping reply"; done
+    echo "role=$role vip=$VIP if=$IF vhid=$VHID peer=$PEER uptime=$(kc_ha_uptime)s egress_routes=$have default=${curdef:-none}@${curdev:-none} upstream_by_priority=[$GWS]"
+    for g in $GWS; do /sbin/ping -q -c 1 -W 700 "${g%@*}" >/dev/null 2>&1 && echo "  ${g%@*} (${g#*@}) answers ping" || echo "  ${g%@*} (${g#*@}) no ping reply"; done
     exit 0
 fi
 
@@ -84,23 +68,36 @@ case "$role" in
         fi ;;
 esac
 
-# Default route missing or pointing into a LAN: pin it to an upstream gateway.
+# Decide whether the default route needs (re)pinning.
+repin=no
 case "$curdef" in
-    ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*)
-        pick=""
-        if [ "$role" = MASTER ]; then
-            for gw in $GWS; do
-                if /sbin/ping -q -c 1 -W 700 "$gw" >/dev/null 2>&1 || /sbin/ping -q -c 1 -W 700 "$gw" >/dev/null 2>&1; then
-                    pick=$gw; break
-                fi
-            done
-            [ -z "$pick" ] && log "MASTER: no upstream gateway answered ping, using first by priority"
-        fi
-        [ -z "$pick" ] && pick=${GWS%% *}
-        if [ -n "$pick" ]; then
-            run /sbin/route -q delete default >/dev/null 2>&1
-            run /sbin/route -q add default "$pick" >/dev/null 2>&1
-            log "${role:-no-carp}: default route was '${curdef:-none}', pinned to $pick"
-        fi ;;
+    ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*) repin=yes ;;
+    *)  # a real gateway: wrong device?
+        for g in $GWS; do
+            if [ "${g%@*}" = "$curdef" ] && [ -n "${g#*@}" ] && [ "$curdev" != "${g#*@}" ]; then repin=yes; fi
+        done ;;
 esac
+[ "$repin" = yes ] || exit 0
+
+pick=""
+if [ "$role" = MASTER ]; then
+    for g in $GWS; do
+        if /sbin/ping -q -c 1 -W 700 "${g%@*}" >/dev/null 2>&1 || /sbin/ping -q -c 1 -W 700 "${g%@*}" >/dev/null 2>&1; then
+            pick=$g; break
+        fi
+    done
+    [ -z "$pick" ] && [ -n "$GWS" ] && log "MASTER: no upstream gateway answered ping, using first by priority"
+fi
+[ -z "$pick" ] && pick=${GWS%% *}
+[ -n "$pick" ] || exit 0
+gw=${pick%@*}; dev=${pick#*@}
+run /sbin/route -q delete default >/dev/null 2>&1
+if [ -n "$dev" ]; then
+    # bind the gateway to its WAN device first so the default route cannot
+    # resolve through the backup-egress /1 routes
+    run /sbin/route -q delete -host "$gw" >/dev/null 2>&1
+    run /sbin/route -q add -host "$gw" -iface "$dev" >/dev/null 2>&1
+fi
+run /sbin/route -q add default "$gw" >/dev/null 2>&1
+log "${role:-no-carp}: default route was '${curdef:-none}' on '${curdev:-none}', pinned to $gw on ${dev:-auto}"
 exit 0
