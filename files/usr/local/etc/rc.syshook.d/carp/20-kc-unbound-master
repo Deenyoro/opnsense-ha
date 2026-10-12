@@ -1,0 +1,4 @@
+#!/bin/sh
+# argv: <vhid>@<iface> <MASTER|BACKUP|INIT>; only the vhid 12 MASTER event matters
+case "$1:$2" in 12@*:MASTER) ( /usr/local/sbin/kc-unbound-master ) >/dev/null 2>&1 & ;; esac
+exit 0

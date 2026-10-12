@@ -1,0 +1,25 @@
+<!-- Services > CARP VIP DHCP > keeper, as stored in config.xml (OPNsense/CarpVipDhcp). -->
+<CarpVipDhcp version="1.1.0" description="CARP-VIP DHCP lease keeper">
+  <keepers>
+    <keeper>
+      <enabled>1</enabled>
+      <carpVip>173.71.182.102</carpVip>        <!-- the CARP VIP that carries the ISP-assigned address -->
+      <chaddrOverride />                       <!-- empty = use the VIP's virtual MAC 00:00:5e:00:01:<vhid hex> -->
+      <demoteOnLeaseLoss>0</demoteOnLeaseLoss>
+      <followIp>1</followIp>                   <!-- ISP hands out a new address -> rewrite VIP, gateway, reload filter -->
+      <aliasName>wan1_carp_vip</aliasName>     <!-- firewall alias kept equal to the current public IP -->
+      <arpNudgeInterval>120</arpNudgeInterval> <!-- refresh the ISP gateway's ARP entry while MASTER -->
+      <arpListenPromisc>0</arpListenPromisc>
+      <vendorClass />
+      <clientId />
+      <hostname />
+      <defaultRouteMode>off</defaultRouteMode> <!-- default route is handled by kc-ha-egress instead -->
+      <backupEgress>0</backupEgress>           <!-- backup-node egress is handled by kc-ha-egress instead -->
+      <backupEgressForm>split</backupEgressForm>
+      <backupEgressGateway />
+      <backupEgressInterface />
+      <backupEgressPrefixes />
+      <description>WAN1 (Verizon Fios, dynamic) public address on CARP vhid 221</description>
+    </keeper>
+  </keepers>
+</CarpVipDhcp>

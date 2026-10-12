@@ -1,0 +1,18 @@
+#!/bin/sh
+# KC HA: after this node becomes CARP MASTER, restart Unbound so it drops any
+# upstream failures it cached while it was BACKUP (seen in the failover test:
+# the new master answered SERVFAIL until Unbound was restarted), then verify
+# resolution and retry once. Only acts on the VLAN 12 VIP (vhid 12) so one
+# failover triggers one restart, not one per VIP. Logs to syslog (kc-ha-dns).
+VIP_IF=vtnet1_vlan12; VHID=12
+role=$(/sbin/ifconfig $VIP_IF 2>/dev/null | awk -v v="vhid $VHID" '$0 ~ "carp: [A-Z]+ " v {print $2; exit}')
+[ "$role" = MASTER ] || exit 0
+sleep 4    # let kc-ha-egress drop the backup routes first
+ok() { /usr/bin/drill -Q opnsense.org @127.0.0.1 2>/dev/null | grep -qE '^[0-9a-f:.]+$'; }
+for try in 1 2; do
+    /usr/local/sbin/configctl unbound restart >/dev/null 2>&1
+    sleep 3
+    if ok; then logger -t kc-ha-dns "MASTER: unbound restarted, resolving ok (try $try)"; exit 0; fi
+done
+logger -p daemon.err -t kc-ha-dns "MASTER: unbound restarted twice but still NOT resolving"
+exit 1

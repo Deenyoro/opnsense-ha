@@ -1,0 +1,55 @@
+#!/bin/sh
+# KC HA: keep forwarding usable the instant this node becomes CARP MASTER, and
+# give the CARP BACKUP node internet via the current master.
+#
+# Why: gateway monitoring (dpinger) can only probe through the CARP VIPs, so on
+# the BACKUP node every WAN gateway always reads "down" and OPNsense installs no
+# default route (or a wrong one). A takeover would then forward nothing until the
+# monitors recover (tens of seconds). We pin the kernel default route to the
+# primary upstream gateway on both roles; OPNsense re-evaluates it as soon as the
+# monitors come up and still fails over between WANs on its own.
+#
+# The primary is read from the config: the enabled, upstream ("defaultgw") IPv4
+# gateway with the lowest priority number. Adding WAN3/WAN4 needs no change here:
+# mark the new gateway as upstream and give it a priority.
+#
+# BACKUP: additionally route 0/1 + 128/1 via the master's VLAN 12 VIP so this
+# node's own traffic (updates, CrowdSec, NTP) works; removed on MASTER.
+# Reads the real CARP role rather than trusting the event arguments. Idempotent.
+VIP=10.10.12.1; IF=vtnet1_vlan12; VHID=12
+PRIMARY_GW=$(/usr/local/bin/python3 - <<'PY'
+import xml.etree.ElementTree as ET
+r=ET.parse('/conf/config.xml').getroot(); best=None
+for it in r.find('OPNsense/Gateways').iter('gateway_item'):
+    g=lambda k,d='': (it.findtext(k) or d)
+    if g('disabled','0')=='1' or g('force_down','0')=='1' or g('defaultgw','0')!='1' or g('ipprotocol','inet')!='inet': continue
+    if not g('gateway') or g('gateway')=='dynamic': continue
+    p=int(g('priority','255') or 255)
+    if best is None or p<best[0]: best=(p,g('gateway'))
+print(best[1] if best else '')
+PY
+)
+role=$(/sbin/ifconfig $IF 2>/dev/null | awk -v v="vhid $VHID" '$0 ~ "carp: [A-Z]+ " v {print $2; exit}')
+have=$(/usr/bin/netstat -rn -f inet | awk '$1=="0.0.0.0/1"||$1=="128.0.0.0/1"' | wc -l | tr -d ' ')
+curdef=$(/usr/bin/netstat -rn -f inet | awk '$1=="default"{print $2; exit}')
+case "$role" in
+    BACKUP)
+        if [ "$have" != 2 ]; then
+            /sbin/route -q delete -net 0.0.0.0/1 >/dev/null 2>&1; /sbin/route -q delete -net 128.0.0.0/1 >/dev/null 2>&1
+            /sbin/route -q add -net 0.0.0.0/1 $VIP && /sbin/route -q add -net 128.0.0.0/1 $VIP
+            logger -t kc-ha-egress "BACKUP: egress via $VIP installed"
+        fi ;;
+    *)
+        if [ "$have" != 0 ]; then
+            /sbin/route -q delete -net 0.0.0.0/1 >/dev/null 2>&1; /sbin/route -q delete -net 128.0.0.0/1 >/dev/null 2>&1
+            logger -t kc-ha-egress "${role:-no-carp}: egress routes removed"
+        fi ;;
+esac
+case "$curdef" in
+    ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
+        if [ -n "$PRIMARY_GW" ]; then
+            /sbin/route -q delete default >/dev/null 2>&1; /sbin/route -q add default $PRIMARY_GW >/dev/null 2>&1
+            logger -t kc-ha-egress "${role:-no-carp}: default route was '${curdef:-none}', pinned to $PRIMARY_GW"
+        fi ;;
+esac
+exit 0

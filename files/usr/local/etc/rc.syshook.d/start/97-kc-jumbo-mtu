@@ -1,0 +1,10 @@
+#!/bin/sh
+# KC: jumbo frames for the cluster VLAN. config.xml sets MTU 9000 on the
+# parent (lan/vtnet1) and ClusterVLAN (vtnet1_vlan12), but OPNsense does not
+# apply the parent's MTU because the 'lan' interface is disabled, so VLAN12
+# stays capped at 1500. Nodes/backup120 use 9000, and oversized frames are
+# then dropped on receive (no ICMP), which hangs routed TLS/S3 traffic.
+# 2026-09-25: Suricata IPS (netmap) reset these to 1500 and caused an outage.
+/sbin/ifconfig vtnet1 mtu 9000
+/sbin/ifconfig vtnet1_vlan12 mtu 9000
+/usr/bin/logger -t kc-jumbo-mtu "vtnet1/vtnet1_vlan12 MTU set to 9000"
