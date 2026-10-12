@@ -169,8 +169,11 @@ sysctl net.inet.carp.demotion=-240    # relative counter: undo with the negative
   outbound NAT rule for the tunnel port.
 - Tailscale: with both nodes advertising the same subnets, the control plane may pick the
   backup as the active subnet router.
-- Services that must run on one node only (mDNS/SSDP relay, ddclient): list them in
-  `MASTER_ONLY_SERVICES` in `kc-ha.conf`.
+- Services that must run on one node only (UPnP/miniupnpd, mDNS/SSDP relay, ddclient):
+  list them in `MASTER_ONLY_SERVICES` in `kc-ha.conf`. The service must be *enabled* in
+  the config of **both** nodes (UPnP settings are not HA-synced; on the KC pair fw-b had
+  UPnP disabled, so after a failover nothing served UPnP). `check.sh` compares the UPnP
+  section. The KC pair uses `MASTER_ONLY_SERVICES="miniupnpd"`.
 
 ## Adding a WAN
 

@@ -47,6 +47,7 @@ s=r.find("system"); print(" gw_switch_default=%s skip_rules_gw_down=%s" % (s.fin
 print("vips=" + ";".join("%s/%s/%s/skew%s" % (v.findtext("interface"),v.findtext("subnet"),v.findtext("vhid"),v.findtext("advskew")) for v in r.find("virtualip").iter("vip") if v.findtext("mode")=="carp"))
 print("sysctl=" + ";".join("%s=%s" % (i.findtext("tunable"), i.findtext("value")) for i in r.find("sysctl").iter("item") if (i.findtext("value") or "") not in ("", "default")))
 h=r.find("hasync"); print("hasync=pfsyncif=%s pfsyncversion=%s preempt_disabled=%s" % (h.findtext("pfsyncinterface"), h.findtext("pfsyncversion"), h.findtext("disablepreempt")))
+u=r.find("installedpackages/miniupnpd/config"); print("upnp=" + (";".join("%s=%s" % (c.tag, c.text or "") for c in u if c.tag != "overridewanip") if u is not None else "none"))
 print("keepers=%d" % len(list(r.find("OPNsense/CarpVipDhcp/keepers").iter("keeper"))) if r.find("OPNsense/CarpVipDhcp/keepers") is not None else "keepers=0")
 PY
 REMOTE
@@ -92,7 +93,7 @@ for n in A B; do
     case "$(get ifgw "$D")" in *wan=*) ok "wan interface has its gateway set (reply-to)" ;; *) fail "wan interface has no gateway (no reply-to on WAN1 rules)" ;; esac
 done
 echo "== pair"
-for k in devices ifgw gateways vips sysctl hasync hooks conf; do
+for k in devices ifgw gateways vips sysctl hasync hooks conf upnp; do
     va=$(get $k "$A"); vb=$(get $k "$B")
     case $k in
         vips) va=$(printf '%s' "$va" | sed 's/skew[0-9]*//g'); vb=$(printf '%s' "$vb" | sed 's/skew[0-9]*//g') ;;   # skew differs by design
