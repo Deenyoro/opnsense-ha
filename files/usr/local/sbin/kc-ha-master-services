@@ -1,9 +1,16 @@
 #!/bin/sh
 # KC HA: services that must run on exactly one node (MASTER_ONLY_SERVICES in
-# kc-ha.conf, e.g. udpbroadcastrelay or ddclient): started on the master,
-# stopped elsewhere. OPNsense restarts services on reconfigure regardless of
-# role, so this also runs from cron. Boot-time false MASTER events are ignored
-# (kc_ha_master_trusted). Idempotent; a stop/start is logged (kc-ha-services).
+# kc-ha.conf, e.g. miniupnpd, udpbroadcastrelay or ddclient): started on the
+# master, stopped elsewhere. OPNsense restarts services on reconfigure
+# regardless of role, so this also runs from cron. Boot-time false MASTER
+# events are ignored (kc_ha_master_trusted). Idempotent; a stop/start is logged
+# (kc-ha-services). The service must be enabled in the config of BOTH nodes.
+#
+# Start = `pluginctl -s <svc> start`; if that leaves it not running (plugins
+# whose config file is only rendered by their configure hook, e.g. miniupnpd
+# on a node where it was never enabled before) fall back to the plugin's own
+# bootup configure hook, scoped to that plugin: `pluginctl -c bootup:<svc>`
+# (renders the config and starts). A start that still fails is logged as an error.
 # one at a time: a CARP transition fires the hook once per VIP
 if [ -z "$KC_HA_LOCKED" ]; then
     KC_HA_LOCKED=1 exec /usr/bin/lockf -t 30 /var/run/kc-ha-master-services.lock /bin/sh "$0" "$@"
@@ -17,15 +24,20 @@ want=stopped
 if [ "$role" = MASTER ]; then
     if kc_ha_master_trusted; then want=running; else exit 0; fi
 fi
+state() { case "$(/usr/local/sbin/pluginctl -s "$1" status 2>/dev/null)" in *"is running"*) echo running ;; *) echo stopped ;; esac; }
 for svc in $MASTER_ONLY_SERVICES; do
-    case "$(/usr/local/sbin/pluginctl -s "$svc" status 2>/dev/null)" in
-        *"is running"*) is=running ;; *) is=stopped ;;
-    esac
-    [ "$is" = "$want" ] && continue
+    [ "$(state "$svc")" = "$want" ] && continue
     if [ "$want" = running ]; then
-        /usr/local/sbin/pluginctl -s "$svc" start >/dev/null 2>&1 && logger -t kc-ha-services "MASTER: started $svc"
+        /usr/local/sbin/pluginctl -s "$svc" start >/dev/null 2>&1; sleep 1
+        if [ "$(state "$svc")" != running ]; then
+            /usr/local/sbin/pluginctl -c "bootup:$svc" >/dev/null 2>&1; sleep 1
+        fi
+        if [ "$(state "$svc")" = running ]; then logger -t kc-ha-services "MASTER: started $svc"
+        else logger -p daemon.err -t kc-ha-services "MASTER: FAILED to start $svc (is it enabled in this node's config?)"; fi
     else
-        /usr/local/sbin/pluginctl -s "$svc" stop >/dev/null 2>&1 && logger -t kc-ha-services "${role:-no-carp}: stopped $svc"
+        /usr/local/sbin/pluginctl -s "$svc" stop >/dev/null 2>&1; sleep 1
+        if [ "$(state "$svc")" = stopped ]; then logger -t kc-ha-services "${role:-no-carp}: stopped $svc"
+        else logger -p daemon.err -t kc-ha-services "${role:-no-carp}: FAILED to stop $svc"; fi
     fi
 done
 exit 0
