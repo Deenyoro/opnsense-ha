@@ -5,6 +5,10 @@
 # stays capped at 1500. Nodes/backup120 use 9000, and oversized frames are
 # then dropped on receive (no ICMP), which hangs routed TLS/S3 traffic.
 # 2026-09-25: Suricata IPS (netmap) reset these to 1500 and caused an outage.
-/sbin/ifconfig vtnet1 mtu 9000
-/sbin/ifconfig vtnet1_vlan12 mtu 9000
-/usr/bin/logger -t kc-jumbo-mtu "vtnet1/vtnet1_vlan12 MTU set to 9000"
+# Idempotent: only sets what differs (an MTU change re-inits the interface).
+for i in vtnet1 vtnet1_vlan12; do
+    cur=$(/sbin/ifconfig $i 2>/dev/null | awk 'NR==1{for(n=1;n<=NF;n++) if($n=="mtu") print $(n+1)}')
+    if [ -n "$cur" ] && [ "$cur" != 9000 ]; then
+        /sbin/ifconfig $i mtu 9000 && /usr/bin/logger -t kc-jumbo-mtu "$i MTU $cur -> 9000"
+    fi
+done

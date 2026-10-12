@@ -26,6 +26,23 @@ fi
 # Scripts and hooks (tar over ssh; the firewall's login shell is csh, so keep it to one command).
 ( cd "$here/files" && tar -cf - usr ) | ssh "$host" "tar -xf - -C / && chmod 755 /usr/local/sbin/kc-ha-egress /usr/local/sbin/kc-unbound-master /usr/local/etc/rc.syshook.d/carp/*-kc-* /usr/local/etc/rc.syshook.d/start/9*-kc-* /usr/local/etc/rc.syshook.d/start/95-pfsync-maxupd"
 
-# Apply immediately (idempotent) and show the result.
-ssh "$host" "/usr/local/sbin/kc-ha-egress; /usr/local/etc/rc.syshook.d/start/95-pfsync-maxupd; netstat -rn -f inet | egrep '^(default|0.0.0.0/1|128.0.0.0/1) '; ifconfig pfsync0 | grep maxupd"
+# Apply immediately. Every hook is idempotent; the only one that can disturb a
+# running node is 95-pfsync-maxupd when maxupd is still at the default: changing
+# it restarts the pfsync bulk sync, which demotes CARP for ~1 s (a MASTER hands
+# over and preempts back). So: install on the BACKUP node first, and on a MASTER
+# whose maxupd is not yet 8 the script warns and leaves it for the next reboot.
+ssh "$host" "sh -s" <<'REMOTE'
+/usr/local/sbin/kc-ha-egress
+/usr/local/etc/rc.syshook.d/start/97-kc-jumbo-mtu
+cur=$(ifconfig pfsync0 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="maxupd:") print $(i+1)}')
+if [ "$cur" != 8 ]; then
+    if ifconfig | grep -q "carp: MASTER"; then
+        echo "WARNING: pfsync maxupd is $cur and this node is CARP MASTER; not changing it live (would cause a ~1 s CARP flip). It applies at the next reboot, or run /usr/local/etc/rc.syshook.d/start/95-pfsync-maxupd during a maintenance window."
+    else
+        /usr/local/etc/rc.syshook.d/start/95-pfsync-maxupd
+    fi
+fi
+netstat -rn -f inet | egrep '^(default|0.0.0.0/1|128.0.0.0/1) '
+ifconfig pfsync0 | grep maxupd
+REMOTE
 echo "done: $host"
