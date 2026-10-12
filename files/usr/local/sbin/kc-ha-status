@@ -17,8 +17,8 @@ svcs=$(for s in $MASTER_ONLY_SERVICES; do case "$(/usr/local/sbin/pluginctl -s "
 keeper=$(/usr/local/etc/rc.d/carpvipdhcp status 2>/dev/null | head -1)
 ver=$(cat /usr/local/etc/kc-ha.version 2>/dev/null)
 if [ "$1" = "--kv" ]; then
-    printf 'host=%s\nrole=%s\nmasters=%s\nbackups=%s\ndemotion=%s\npreempt=%s\npfsync_demotion_factor=%s\nmaintenance=%s\npfsync=%s\nstates=%s\ndefault=%s\negress=%s\npeer=%s\nuptime=%s\ngateways=%s\nservices=%s\nkeeper=%s\nversion=%s\n' \
-        "$(hostname)" "$role" "$nm" "$nb" "$dem" "$pre" "$pdf" "$maint" "$pfs" "$states" "$def" "$egress" "$peer" "$(kc_ha_uptime)" "$gwst" "$svcs" "$keeper" "$ver"
+    printf 'vip=%s\nvhid=%s\nhost=%s\nrole=%s\nmasters=%s\nbackups=%s\ndemotion=%s\npreempt=%s\npfsync_demotion_factor=%s\nmaintenance=%s\npfsync=%s\nstates=%s\ndefault=%s\negress=%s\npeer=%s\nuptime=%s\ngateways=%s\nservices=%s\nkeeper=%s\nversion=%s\n' \
+        "$VIP" "$VHID" "$(hostname)" "$role" "$nm" "$nb" "$dem" "$pre" "$pdf" "$maint" "$pfs" "$states" "$def" "$egress" "$peer" "$(kc_ha_uptime)" "$gwst" "$svcs" "$keeper" "$ver"
     exit 0
 fi
 cat <<EOT

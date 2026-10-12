@@ -23,7 +23,7 @@ st() { ssh "$1" '/usr/local/sbin/kc-ha-status --kv'; }
 echo "== pre-flight"
 SM=$(st "$M"); SB=$(st "$B")
 g() { printf '%s\n' "$2" | sed -n "s/^$1=//p"; }
-[ -z "$DNSV" ] && DNSV=$(ssh "$M" '. /usr/local/sbin/kc-ha-lib; kc_ha_load; echo $VIP')
+[ -z "$DNSV" ] && DNSV=$(g vip "$SM")
 bad=0
 [ "$(g backups "$SM")" = 0 ] && [ "$(g masters "$SM")" -gt 0 ] || { echo "  $M is not MASTER on all VIPs ($(g masters "$SM")/$(g backups "$SM"))"; bad=1; }
 [ "$(g masters "$SB")" = 0 ] && [ "$(g backups "$SB")" -gt 0 ] || { echo "  $B is not BACKUP on all VIPs ($(g masters "$SB")/$(g backups "$SB"))"; bad=1; }
@@ -35,9 +35,8 @@ echo "  probes: ping $PIP, dns @$DNSV, https $URL"
 
 echo "== probes start $(date +%T)"
 T0=$(date +%s)
-( ping -i 1 -W 1 "$PIP" > "$tmp/ping" 2>&1 ) & P1=$!
+( ping -c $((HOLD + 30)) -i 1 -W 1 "$PIP" > "$tmp/ping" 2>&1 ) & P1=$!
 ( while :; do s=$(date +%s.%N); if dig +time=1 +tries=1 @"$DNSV" opnsense.org A >/dev/null 2>&1; then echo "$s ok"; else echo "$s FAIL"; fi; sleep 1; done > "$tmp/dns" ) & P2=$!
-( i=0; while :; do s=$(date +%s.%N); i=$((i+1)); echo "$(date +%s) $i" >/dev/null; sleep 0.5; done ) >/dev/null 2>&1 & P3=$!
 # one persistent HTTPS connection: curl reuses the connection across URLs given in one invocation
 ( n=$(( (HOLD + 30) * 2 )); set --; i=0; while [ $i -lt $n ]; do set -- "$@" "$URL"; i=$((i+1)); done
   curl -s -o /dev/null --keepalive-time 5 --max-time 3 --rate 2/s -w '%{time_total} %{http_code} %{num_connects}\n' "$@" > "$tmp/https" 2>&1 ) & P4=$!
@@ -47,14 +46,13 @@ ssh "$M" "daemon -f sh -c 'sysctl net.inet.carp.demotion=240; sleep $HOLD; sysct
 TF=$(date +%s)
 sleep $((HOLD + 20))
 TB=$((TF + HOLD))
-kill $P1 $P2 $P3 $P4 2>/dev/null; wait 2>/dev/null
+wait $P1 2>/dev/null; kill $P2 $P4 2>/dev/null; wait 2>/dev/null
 echo "== probes end $(date +%T)"
 
 echo "== results"
-sent=$(grep -c "bytes from\|Request timeout\|no answer" "$tmp/ping"); recv=$(grep -c "bytes from" "$tmp/ping")
-echo "  ping $PIP: $recv of $(grep -c "^64 bytes\|^Request\|timeout" "$tmp/ping") answered; summary: $(grep -E 'packets transmitted' "$tmp/ping" || echo 'n/a')"
+echo "  ping $PIP: $(grep -E 'packets transmitted' "$tmp/ping" || echo 'n/a')"
 echo "  dns @$DNSV: $(grep -c ' ok' "$tmp/dns") ok, $(grep -c FAIL "$tmp/dns") failed"
-echo "  https: $(wc -l < "$tmp/https" | tr -d ' ') requests, $(awk '$2!="204" && $2!="200"' "$tmp/https" | wc -l | tr -d ' ') failed, $(awk '$3>0' "$tmp/https" | wc -l | tr -d ' ') reconnect(s), slowest $(sort -n "$tmp/https" | tail -1 | cut -d' ' -f1)s"
+echo "  https: $(wc -l < "$tmp/https" | tr -d ' ') requests, $(awk '$2!="204" && $2!="200"' "$tmp/https" | wc -l | tr -d ' ') failed, $(awk 'NR>1 && $3>0' "$tmp/https" | wc -l | tr -d ' ') reconnect(s), slowest $(sort -n "$tmp/https" | tail -1 | cut -d' ' -f1)s"
 echo "  dns failures by second since failover:"; awk -v tf="$TF" '/FAIL/ {printf "    +%ds\n", int($1)-tf}' "$tmp/dns" | sort | uniq -c | head
 echo "== state after"
 SM=$(st "$M"); SB=$(st "$B")

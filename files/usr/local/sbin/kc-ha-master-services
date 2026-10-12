@@ -4,6 +4,10 @@
 # stopped elsewhere. OPNsense restarts services on reconfigure regardless of
 # role, so this also runs from cron. Boot-time false MASTER events are ignored
 # (kc_ha_master_trusted). Idempotent; a stop/start is logged (kc-ha-services).
+# one at a time: a CARP transition fires the hook once per VIP
+if [ -z "$KC_HA_LOCKED" ]; then
+    KC_HA_LOCKED=1 exec /usr/bin/lockf -t 30 /var/run/kc-ha-master-services.lock /bin/sh "$0" "$@"
+fi
 . /usr/local/sbin/kc-ha-lib
 [ -n "$MASTER_ONLY_SERVICES" ] || exit 0
 kc_ha_load

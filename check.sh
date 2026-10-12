@@ -32,7 +32,8 @@ echo "keeper_last=$(grep -h 'INFO' /var/log/carpvipdhcp-*.log 2>/dev/null | tail
 echo "mtu=$(ifconfig vtnet1_vlan12 2>/dev/null | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="mtu") print $(i+1)}')"
 echo "kea=$(curl -s -m 3 -X POST -H 'Content-Type: application/json' -d '{"command":"status-get","service":["dhcp4"]}' http://127.0.0.1:8000/ | /usr/local/bin/python3 -c 'import sys,json; h=json.load(sys.stdin)[0]["arguments"]["high-availability"][0]["ha-servers"]; print(h["local"]["role"], h["local"]["state"], "remote", h["remote"]["last-state"], "in-touch", h["remote"]["in-touch"])' 2>/dev/null)"
 echo "carprules=$(pfctl -sr 2>/dev/null | grep -c 'proto carp')"
-echo "rules=$(pfctl -sr 2>/dev/null | wc -l | tr -d ' ') nat=$(pfctl -sn 2>/dev/null | wc -l | tr -d ' ')"
+# anchors of master-only services (e.g. miniupnpd) legitimately exist on the master only
+echo "rules=$(pfctl -sr 2>/dev/null | grep -v -E '^(nat-|rdr-)?anchor "(miniupnpd)"' | wc -l | tr -d ' ') nat=$(pfctl -sn 2>/dev/null | grep -v -E '^(nat-|rdr-)?anchor "(miniupnpd)"' | wc -l | tr -d ' ')"
 echo "hooks=$(ls /usr/local/etc/rc.syshook.d/carp /usr/local/etc/rc.syshook.d/start | sort | tr '\n' ' ')"
 echo "timedout=$(grep -h -c 'master timed out' /var/log/system/latest.log 2>/dev/null)"
 /usr/local/bin/python3 - <<'PY'
@@ -45,7 +46,7 @@ print("gateways=" + ";".join("%s/%s/%s/prio%s/up%s/ks%s/fd%s/far%s/dis%s" % (g.f
 s=r.find("system"); print(" gw_switch_default=%s skip_rules_gw_down=%s" % (s.findtext("gw_switch_default"), s.findtext("skip_rules_gw_down")))
 print("vips=" + ";".join("%s/%s/%s/skew%s" % (v.findtext("interface"),v.findtext("subnet"),v.findtext("vhid"),v.findtext("advskew")) for v in r.find("virtualip").iter("vip") if v.findtext("mode")=="carp"))
 print("sysctl=" + ";".join("%s=%s" % (i.findtext("tunable"), i.findtext("value")) for i in r.find("sysctl").iter("item") if (i.findtext("value") or "") not in ("", "default")))
-h=r.find("hasync"); print("hasync=%s items=%s" % (h.findtext("pfsyncpeerip"), h.findtext("syncitems")))
+h=r.find("hasync"); print("hasync=pfsyncif=%s pfsyncversion=%s preempt_disabled=%s" % (h.findtext("pfsyncinterface"), h.findtext("pfsyncversion"), h.findtext("disablepreempt")))
 print("keepers=%d" % len(list(r.find("OPNsense/CarpVipDhcp/keepers").iter("keeper"))) if r.find("OPNsense/CarpVipDhcp/keepers") is not None else "keepers=0")
 PY
 REMOTE
@@ -94,7 +95,6 @@ echo "== pair"
 for k in devices ifgw gateways vips sysctl hasync hooks conf; do
     va=$(get $k "$A"); vb=$(get $k "$B")
     case $k in
-        hasync) va=$(printf '%s' "$va" | sed 's/^[^ ]* //'); vb=$(printf '%s' "$vb" | sed 's/^[^ ]* //') ;;   # peer IP differs by design
         vips) va=$(printf '%s' "$va" | sed 's/skew[0-9]*//g'); vb=$(printf '%s' "$vb" | sed 's/skew[0-9]*//g') ;;   # skew differs by design
     esac
     [ "$va" = "$vb" ] && ok "$k identical on both nodes" || { fail "$k differ (not HA-synced; edit both):"; echo "    A: $va"; echo "    B: $vb"; }
