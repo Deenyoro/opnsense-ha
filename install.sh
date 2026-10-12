@@ -16,7 +16,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 # Plugin: only installed if missing or a different version.
 pkgfile=$(ls "$here"/plugins/os-carp-vip-dhcp/os-carp-vip-dhcp-*.pkg | head -1)
 pkgver=$(basename "$pkgfile" .pkg | sed 's/^os-carp-vip-dhcp-//')
-if [ "$(ssh "$host" "pkg query %v os-carp-vip-dhcp 2>/dev/null || true")" != "$pkgver" ]; then
+# (no shell redirects in the remote command: the OPNsense root shell is csh)
+if [ "$(ssh "$host" "pkg query %v os-carp-vip-dhcp")" != "$pkgver" ]; then
     echo "installing os-carp-vip-dhcp $pkgver on $host"
     scp -q "$pkgfile" "$host:/tmp/"
     ssh "$host" "pkg install -y /tmp/$(basename "$pkgfile") && rm -f /tmp/$(basename "$pkgfile")"
