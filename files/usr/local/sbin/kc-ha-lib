@@ -2,7 +2,7 @@
 # Shared helpers for the kc-ha scripts. Source it: . /usr/local/sbin/kc-ha-lib
 # Everything is read from /conf/config.xml and /usr/local/etc/kc-ha.conf, so the
 # same files work unchanged on every node of every site.
-VHID=12; BOOT_GRACE=120; MASTER_ONLY_SERVICES=""
+VHID=12; BOOT_GRACE=120; MASTER_ONLY_SERVICES=""; JUMBO_MTU_IFS=""; JUMBO_MTU=9000
 [ -r /usr/local/etc/kc-ha.conf ] && . /usr/local/etc/kc-ha.conf
 VHID=${KC_HA_VHID:-$VHID}
 
@@ -32,6 +32,10 @@ print('GWS="%s"' % ' '.join('%s@%s' % (x[1], x[2]) for x in gws))
 PY
 )"
 }
+
+# Device of a configured upstream gateway ("" if $1 is not one of them).
+kc_ha_gw_known() { for _g in $GWS; do [ "${_g%@*}" = "$1" ] && return 0; done; return 1; }
+kc_ha_gw_dev() { for _g in $GWS; do [ "${_g%@*}" = "$1" ] && { echo "${_g#*@}"; return 0; }; done; return 1; }
 
 # CARP role of the reference VIP: MASTER, BACKUP, INIT or empty.
 kc_ha_role() { /sbin/ifconfig "$IF" 2>/dev/null | awk -v v="vhid $VHID" '$0 ~ "carp: [A-Z]+ " v {print $2; exit}'; }

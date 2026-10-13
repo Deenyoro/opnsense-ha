@@ -22,6 +22,15 @@
 # lands on the LAN device (field report 2026-10-12: black hole after takeover).
 # A default route on the wrong device is therefore re-pinned too.
 #
+# "Usable default route" = its gateway is one of the configured upstream
+# gateways and it sits on that gateway's device. A configured upstream gateway
+# may be a private address (a CPE or cellular router LAN, e.g. 192.168.4.1): it
+# is left alone, so a WAN failover OPNsense has already made is not undone by a
+# CARP event. Only a default route that is missing, or points at an address that
+# is not a configured gateway and is private/link-local (the LAN VIP, a leftover),
+# is treated as unusable. A public gateway that is not in the list (a dynamic
+# DHCP gateway) is left alone as before.
+#
 # BACKUP: additionally route 0/1 + 128/1 via the master's LAN VIP so this
 # node's own traffic (updates, CrowdSec, NTP) works; removed on MASTER.
 # Reads the real CARP role rather than trusting hook arguments. Idempotent.
@@ -70,13 +79,15 @@ esac
 
 # Decide whether the default route needs (re)pinning.
 repin=no
-case "$curdef" in
-    ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*) repin=yes ;;
-    *)  # a real gateway: wrong device?
-        for g in $GWS; do
-            if [ "${g%@*}" = "$curdef" ] && [ -n "${g#*@}" ] && [ "$curdev" != "${g#*@}" ]; then repin=yes; fi
-        done ;;
-esac
+if [ -n "$curdef" ] && kc_ha_gw_known "$curdef"; then
+    # a configured upstream gateway (public or private): only the device can be wrong
+    want=$(kc_ha_gw_dev "$curdef")
+    [ -n "$want" ] && [ "$curdev" != "$want" ] && repin=yes
+else
+    case "$curdef" in
+        ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*) repin=yes ;;
+    esac
+fi
 [ "$repin" = yes ] || exit 0
 
 pick=""

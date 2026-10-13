@@ -5,7 +5,11 @@
 # resolution and retry once. Only acts for the reference VIP (kc-ha.conf VHID)
 # so one failover triggers one restart, not one per VIP. Logs to syslog
 # (kc-ha-dns). Ignores the boot-time false MASTER (kc_ha_master_trusted).
+#
+# Usage: kc-unbound-master [<vhid>@<iface>]   (the carp hook passes its event;
+# events of other VIPs exit here, before config.xml is parsed)
 . /usr/local/sbin/kc-ha-lib
+[ -z "${1:-}" ] || [ "${1%%@*}" = "$VHID" ] || exit 0
 kc_ha_load
 [ -n "$IF" ] || exit 0
 [ "$(kc_ha_role)" = MASTER ] || exit 0

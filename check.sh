@@ -3,10 +3,12 @@
 #   ./check.sh root@<node-a> root@<node-b>
 # Exit 0 = everything as expected. Any FAIL line: fix it, usually ./install.sh <node>.
 # KC_HA_NO_PLUGIN=1 skips the carp-vip-dhcp checks (sites without a DHCP WAN).
+# KC_HA_SSH overrides the ssh command (default "ssh"), as in install.sh.
 set -u
+SSH=${KC_HA_SSH:-ssh}
 [ $# -eq 2 ] || { echo "usage: $0 root@<node-a> root@<node-b>"; exit 2; }
 here=$(cd "$(dirname "$0")" && pwd)
-version=$(cd "$here" && git describe --always --dirty 2>/dev/null || echo unknown)
+version=$(cd "$here" && git describe --always --dirty 2>/dev/null || cat "$here/VERSION" 2>/dev/null || echo unknown)
 pkgver=$(basename "$(ls "$here"/plugins/os-carp-vip-dhcp/os-carp-vip-dhcp-*.pkg | head -1)" .pkg | sed 's/^os-carp-vip-dhcp-//')
 fails=0
 ok()   { echo "  ok   $*"; }
@@ -15,7 +17,7 @@ warn() { echo "  warn $*"; }
 
 # One ssh per node; the remote side runs sh (login shell is csh). Prints KEY=VALUE lines.
 collect() {
-    ssh "$1" 'sh -s' <<'REMOTE'
+    $SSH "$1" 'sh -s' <<'REMOTE'
 echo "hostname=$(hostname)"
 echo "version=$(opnsense-version -v)"
 echo "pkg=$(pkg query %v os-carp-vip-dhcp)"
@@ -29,7 +31,10 @@ echo "conf=$(grep -v '^#' /usr/local/etc/kc-ha.conf 2>/dev/null | grep . | tr '\
 /usr/local/sbin/kc-ha-status --kv 2>/dev/null | sed 's/^/st:/'
 echo "keeper_hb_age=$(( $(date +%s) - $(stat -f %m /var/run/carpvipdhcp-*.hb 2>/dev/null || echo 0) ))"
 echo "keeper_last=$(grep -h 'INFO' /var/log/carpvipdhcp-*.log 2>/dev/null | tail -1 | cut -c1-120)"
-echo "mtu=$(ifconfig vtnet1_vlan12 2>/dev/null | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="mtu") print $(i+1)}')"
+# jumbo interfaces come from kc-ha.conf (JUMBO_MTU_IFS); "if=mtu/wanted" per interface
+echo "jumbo=$(. /usr/local/sbin/kc-ha-lib 2>/dev/null; for i in $JUMBO_MTU_IFS; do printf '%s=%s/%s ' "$i" "$(ifconfig "$i" 2>/dev/null | awk 'NR==1{for(n=1;n<=NF;n++) if($n=="mtu") print $(n+1)}')" "$JUMBO_MTU"; done)"
+echo "legacy=$(ls /usr/local/sbin/ha-master-services /usr/local/etc/rc.syshook.d/carp/30-ha-master-services /usr/local/etc/rc.syshook.d/start/98-ha-master-services /etc/cron.d/ha-master-services 2>/dev/null | tr '\n' ' ')"
+echo "wandevs=$(. /usr/local/sbin/kc-ha-lib 2>/dev/null; kc_ha_load 2>/dev/null; for g in $GWS; do printf '%s ' "${g#*@}"; done)"
 echo "kea=$(curl -s -m 3 -X POST -H 'Content-Type: application/json' -d '{"command":"status-get","service":["dhcp4"]}' http://127.0.0.1:8000/ | /usr/local/bin/python3 -c 'import sys,json; h=json.load(sys.stdin)[0]["arguments"]["high-availability"][0]["ha-servers"]; print(h["local"]["role"], h["local"]["state"], "remote", h["remote"]["last-state"], "in-touch", h["remote"]["in-touch"])' 2>/dev/null)"
 echo "carprules=$(pfctl -sr 2>/dev/null | grep -c 'proto carp')"
 # anchors of master-only services (e.g. miniupnpd) legitimately exist on the master only
@@ -70,21 +75,32 @@ for n in A B; do
         [ "$want" = "$have" ] && ok "/$f" || fail "/$f differs from repo ($have)"
     done
     [ -n "$(get conf "$D")" ] && ok "kc-ha.conf: $(get conf "$D")" || fail "no /usr/local/etc/kc-ha.conf"
-    [ "$(get st:pfsync "$D")" = "syncok=1 maxupd=8 version=1500" ] && ok "pfsync $(get st:pfsync "$D")" || fail "pfsync: $(get st:pfsync "$D")"
+    # the pfsync protocol version follows the OPNsense release (1400 on 26.1, 1500 on 26.7): only compared across the pair below
+    case "$(get st:pfsync "$D")" in "syncok=1 maxupd=8 version="?*) ok "pfsync $(get st:pfsync "$D")" ;; *) fail "pfsync: $(get st:pfsync "$D") (want syncok=1 maxupd=8)" ;; esac
     [ "$(get st:demotion "$D")" = 0 ] && ok "carp demotion 0" || fail "carp demotion is $(get st:demotion "$D") (a drill left it set, or pfsync bulk stuck: check 'syncok')"
     [ "$(get st:preempt "$D")" = 1 ] && ok "carp preempt on" || fail "carp preempt off"
     [ "$(get st:maintenance "$D")" = 0 ] && ok "not in persistent CARP maintenance mode" || fail "persistent CARP maintenance mode is on"
     [ "$(get st:peer "$D")" = alive ] && ok "pfsync peer answers on SYNC" || fail "pfsync peer does not answer on SYNC"
     [ "$(get carprules "$D")" -ge 2 ] 2>/dev/null && ok "$(get carprules "$D") 'proto carp' rules loaded" || fail "no 'proto carp' pass rules loaded (run: configctl filter reload)"
     [ "$(get timedout "$D")" = 0 ] && ok "no 'master timed out' events in today's log" || warn "$(get timedout "$D") 'master timed out' event(s) in today's log (boot-time dual master?)"
-    [ "$(get mtu "$D")" = 9000 ] && ok "vtnet1_vlan12 mtu 9000" || warn "vtnet1_vlan12 mtu '$(get mtu "$D")' (only matters on the KC pair)"
+    jm=$(get jumbo "$D")
+    if [ -z "$jm" ]; then ok "no jumbo interfaces configured (JUMBO_MTU_IFS empty)"; else
+        for e in $jm; do i=${e%%=*}; v=${e#*=}
+            case " $(get wandevs "$D") " in *" $i "*) fail "JUMBO_MTU_IFS lists $i, which carries an upstream gateway (a WAN); the hook refuses it" ;; esac
+            [ "${v%/*}" = "${v#*/}" ] && ok "$i mtu ${v%/*}" || fail "$i mtu '${v%/*}', want ${v#*/} (run start/97-kc-jumbo-mtu)"
+        done
+    fi
+    [ -z "$(get legacy "$D")" ] || fail "retired prototype files still present (re-run install.sh): $(get legacy "$D")"
     case "$(get kea "$D")" in *"in-touch True"*) ok "kea HA: $(get kea "$D")" ;; "") warn "kea HA status not available (not using Kea HA?)" ;; *) fail "kea HA: $(get kea "$D")" ;; esac
     nm=$(get st:masters "$D"); nb=$(get st:backups "$D"); eg=$(get st:egress "$D"); def=$(get st:default "$D")
     if [ "$nm" -gt 0 ] && [ "$nb" -gt 0 ]; then fail "mixed CARP roles: $nm MASTER / $nb BACKUP"
     elif [ "$nm" -gt 0 ]; then [ -z "$eg" ] && ok "MASTER ($nm VIPs), no backup-egress routes" || fail "MASTER still has egress routes: $eg"
     elif [ "$nb" -gt 0 ]; then [ "$(printf '%s' "$eg" | wc -w)" -eq 2 ] && ok "BACKUP ($nb VIPs), egress via master: $eg" || fail "BACKUP missing egress routes: '$eg'"
     else fail "no CARP VIPs"; fi
-    case "$def" in ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*) fail "default route is '${def:-none}'" ;;
+    # a configured gateway may be private (CPE / cellular router LAN): judge it by its device, not its address
+    dgw=${def%@*}; known=no; [ -n "$dgw" ] && case ";$(get gateways "$D");" in *"/$dgw/"*) known=yes ;; esac
+    [ "$known" = yes ] && dchk="configured" || dchk=$def
+    case "$dchk" in ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*) fail "default route is '${def:-none}'" ;;
         *) dev=${def#*@}; gw=${def%@*}; want=$(printf '%s\n' "$(get devices "$D")" | tr ';' '\n' | sed -n "s/^$(printf '%s' "$(get gateways "$D")" | tr ';' '\n' | grep "/$gw/" | cut -d/ -f2)=//p")
            if [ -n "$want" ] && [ "$want" != "$dev" ]; then fail "default route $gw is on $dev, its WAN device is $want"; else ok "default route $def"; fi ;;
     esac
@@ -93,7 +109,7 @@ for n in A B; do
     case "$(get ifgw "$D")" in *wan=*) ok "wan interface has its gateway set (reply-to)" ;; *) fail "wan interface has no gateway (no reply-to on WAN1 rules)" ;; esac
 done
 echo "== pair"
-for k in devices ifgw gateways vips sysctl hasync hooks conf upnp; do
+for k in devices ifgw gateways vips sysctl hasync hooks conf upnp; do   # (conf includes JUMBO_MTU_IFS)
     va=$(get $k "$A"); vb=$(get $k "$B")
     case $k in
         vips) va=$(printf '%s' "$va" | sed 's/skew[0-9]*//g'); vb=$(printf '%s' "$vb" | sed 's/skew[0-9]*//g') ;;   # skew differs by design
@@ -101,6 +117,8 @@ for k in devices ifgw gateways vips sysctl hasync hooks conf upnp; do
     [ "$va" = "$vb" ] && ok "$k identical on both nodes" || { fail "$k differ (not HA-synced; edit both):"; echo "    A: $va"; echo "    B: $vb"; }
 done
 [ "$(get version "$A")" = "$(get version "$B")" ] && ok "same OPNsense version" || fail "versions differ: $(get version "$A") vs $(get version "$B")"
+pa=$(get st:pfsync "$A"); pb=$(get st:pfsync "$B")
+[ "${pa##*version=}" = "${pb##*version=}" ] && ok "same pfsync protocol version (${pa##*version=})" || fail "pfsync protocol versions differ: ${pa##*version=} vs ${pb##*version=}"
 [ "$(get rules "$A")" = "$(get rules "$B")" ] && ok "same loaded rule/NAT counts ($(get rules "$A"))" || fail "rule/NAT counts differ: $(get rules "$A") vs $(get rules "$B")"
 sa=$(get st:states "$A"); sb=$(get st:states "$B"); d=$((sa - sb)); [ $d -lt 0 ] && d=$((-d))
 [ $d -le $(( (sa + 1) / 5 )) ] && ok "state tables within 20% ($sa / $sb)" || fail "state tables differ a lot ($sa / $sb): pfsync not replicating?"

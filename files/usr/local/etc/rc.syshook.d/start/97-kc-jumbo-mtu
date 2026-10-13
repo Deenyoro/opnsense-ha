@@ -1,14 +1,35 @@
 #!/bin/sh
-# KC: jumbo frames for the cluster VLAN. config.xml sets MTU 9000 on the
-# parent (lan/vtnet1) and ClusterVLAN (vtnet1_vlan12), but OPNsense does not
-# apply the parent's MTU because the 'lan' interface is disabled, so VLAN12
-# stays capped at 1500. Nodes/backup120 use 9000, and oversized frames are
-# then dropped on receive (no ICMP), which hangs routed TLS/S3 traffic.
-# 2026-09-25: Suricata IPS (netmap) reset these to 1500 and caused an outage.
-# Idempotent: only sets what differs (an MTU change re-inits the interface).
-for i in vtnet1 vtnet1_vlan12; do
-    cur=$(/sbin/ifconfig $i 2>/dev/null | awk 'NR==1{for(n=1;n<=NF;n++) if($n=="mtu") print $(n+1)}')
-    if [ -n "$cur" ] && [ "$cur" != 9000 ]; then
-        /sbin/ifconfig $i mtu 9000 && /usr/bin/logger -t kc-jumbo-mtu "$i MTU $cur -> 9000"
+# Jumbo frames for interfaces OPNsense does not size itself. Opt-in: does
+# nothing unless JUMBO_MTU_IFS is set in /usr/local/etc/kc-ha.conf, e.g. on the
+# KC pair  JUMBO_MTU_IFS="vtnet1 vtnet1_vlan12"  (MTU from JUMBO_MTU, default 9000).
+#
+# KC background: config.xml sets MTU 9000 on the parent (lan/vtnet1) and
+# ClusterVLAN (vtnet1_vlan12), but OPNsense does not apply the parent's MTU
+# because the 'lan' interface is disabled, so VLAN12 stays capped at 1500.
+# Nodes/backup120 use 9000, and oversized frames are then dropped on receive
+# (no ICMP), which hangs routed TLS/S3 traffic. 2026-09-25: Suricata IPS
+# (netmap) reset these to 1500 and caused an outage.
+#
+# The device names used to be written in this file. They are per site: on a
+# second site vtnet1 is the active WAN, and an MTU change re-inits the
+# interface. So: names come from the config only, and a device that carries an
+# upstream gateway (a WAN) is refused whatever the config says.
+# Idempotent: only sets what differs. KC_HA_DRY=1 prints instead of acting.
+. /usr/local/sbin/kc-ha-lib
+[ -n "$JUMBO_MTU_IFS" ] || exit 0
+kc_ha_load
+say() { if [ -n "${KC_HA_DRY:-}" ]; then echo "$*"; else /usr/bin/logger -t kc-jumbo-mtu "$*"; fi; }
+for i in $JUMBO_MTU_IFS; do
+    wan=""
+    for g in $GWS; do [ "${g#*@}" = "$i" ] && wan=${g%@*}; done
+    if [ -n "$wan" ]; then
+        say "REFUSED: $i carries upstream gateway $wan (a WAN); remove it from JUMBO_MTU_IFS"
+        continue
     fi
+    cur=$(/sbin/ifconfig "$i" 2>/dev/null | awk 'NR==1{for(n=1;n<=NF;n++) if($n=="mtu") print $(n+1)}')
+    if [ -z "$cur" ]; then say "$i: no such interface"; continue; fi
+    [ "$cur" = "$JUMBO_MTU" ] && continue
+    if [ -n "${KC_HA_DRY:-}" ]; then say "+ ifconfig $i mtu $JUMBO_MTU   (now $cur)"
+    else /sbin/ifconfig "$i" mtu "$JUMBO_MTU" && say "$i MTU $cur -> $JUMBO_MTU"; fi
 done
+exit 0

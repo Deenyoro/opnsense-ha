@@ -15,3 +15,10 @@ BOOT_GRACE=120
 # Started on MASTER, stopped otherwise, by kc-ha-master-services. Names as
 # accepted by `pluginctl -s <name> status`, e.g. "udpbroadcastrelay ddclient".
 MASTER_ONLY_SERVICES=""
+
+# Interfaces to force to JUMBO_MTU at boot (start/97-kc-jumbo-mtu), space
+# separated. Empty = the hook does nothing. Only for a VLAN whose disabled
+# parent OPNsense never sizes (KC pair: "vtnet1 vtnet1_vlan12"). Device names
+# are per site; a device that carries an upstream gateway (a WAN) is refused.
+JUMBO_MTU_IFS=""
+JUMBO_MTU=9000

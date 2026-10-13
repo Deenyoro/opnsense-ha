@@ -20,7 +20,9 @@ Two smaller boot hooks, use if they apply:
 - `start/95-pfsync-maxupd` – `pfsync0 maxupd 8` so standby TCP state windows are fresh
   enough for connections to survive a planned failover (default 128 was too stale).
 - `start/97-kc-jumbo-mtu` – re-applies MTU 9000 on a VLAN whose (disabled) parent
-  interface OPNsense never sizes. Site specific; drop it if you have no jumbo VLAN.
+  interface OPNsense never sizes. Opt-in: it only touches the interfaces listed in
+  `JUMBO_MTU_IFS` in `kc-ha.conf` (none by default) and refuses any device that carries
+  an upstream gateway, so it is safe to install on every site.
 
 ## Interface layout for a DHCP WAN
 
@@ -49,13 +51,26 @@ CrowdSec, Tailscale, interface settings. `install.sh` covers the hook/script par
 | `kc-unbound-master` | Unbound restart on a trusted MASTER event |
 | `kc-ha-master-services` | start/stop `MASTER_ONLY_SERVICES` by role (carp hook, boot, cron every 2 min) |
 | `kc-ha-status` | one-screen status of a node (`--kv` for scripts) |
-| `files/usr/local/etc/kc-ha.conf.sample` | site settings: `VHID`, `BOOT_GRACE`, `MASTER_ONLY_SERVICES`; copied to `kc-ha.conf` once |
+| `files/usr/local/etc/kc-ha.conf.sample` | site settings: `VHID`, `BOOT_GRACE`, `MASTER_ONLY_SERVICES`, `JUMBO_MTU_IFS`; copied to `kc-ha.conf` once |
 | `install.sh` | idempotent install of plugin + files + version stamp, then live apply and status |
 | `check.sh` | acceptance test of the pair (below) |
 | `drill.sh` | controlled failover/failback with probes of existing flows |
 
-Nothing is hardcoded per node: the same files are installed unchanged on every node of
-every site; only `kc-ha.conf` (identical on both nodes) carries site choices.
+Nothing is hardcoded per node or per site: the same files are installed unchanged on
+every node of every site; only `kc-ha.conf` (identical on both nodes) carries site
+choices. No script or hook names a vhid, a VIP or a device.
+
+### First install on a new site
+
+1. Create `/usr/local/etc/kc-ha.conf` on **both** nodes before (or right after) the first
+   `install.sh`: `VHID` = the LAN-side CARP VIP the backup reaches the master through,
+   `MASTER_ONLY_SERVICES` if any, `JUMBO_MTU_IFS` only if you have such a VLAN. With the
+   sample `VHID=12` on a site that has no vhid 12 the kit does nothing and `install.sh`
+   says so.
+2. `KC_HA_NO_PLUGIN=1` if no WAN is DHCP.
+3. `KC_HA_SSH="..."` if the workstation reaches the nodes through a jump host or with a
+   password (`install.sh`, `check.sh` and `drill.sh` all honour it). Without git on the
+   workstation the version stamp is read from a `VERSION` file next to `install.sh`.
 
 ## Install / re-apply / verify
 
@@ -75,12 +90,15 @@ why the backup node goes first.
 `check.sh` is the acceptance test. Per node: kc-ha version stamp, plugin version, every
 file byte-identical to the repo, keeper running with a fresh heartbeat, pfsync `syncok` +
 `maxupd 8`, CARP demotion 0 / preempt on / not in maintenance mode, peer answering on the
-SYNC link, `proto carp` pass rules loaded, no "master timed out" in today's log, one role
+SYNC link, `proto carp` pass rules loaded, no "master timed out" in today's log, every
+`JUMBO_MTU_IFS` interface at its MTU and none of them a WAN device, no retired prototype
+files left, one role
 per node, backup-egress routes only on the BACKUP, default route on a real gateway **and
 on that gateway's WAN device**, no kill-states on gateways, wan interface gateway set, Kea
 HA in touch. Pair: interface **device names**, interface gateways, gateways, VIPs (minus
 skew), tunables, hasync items, hook directories and `kc-ha.conf` identical; same OPNsense
-version; same loaded rule/NAT counts; state tables within 20%; exactly one MASTER.
+version and pfsync protocol version (1400 on 26.1, 1500 on 26.7; not judged per node);
+same loaded rule/NAT counts; state tables within 20%; exactly one MASTER.
 Exit 0 = good. `KC_HA_NO_PLUGIN=1` for a site without the DHCP-WAN plugin.
 
 `drill.sh root@<master> root@<backup> [hold]` pre-flights both nodes, probes an existing
@@ -105,9 +123,9 @@ Then in the GUI (synced by HA): Services > CARP VIP DHCP > add a keeper for the 
 VIP as in `examples/carpvipdhcp-settings.xml`; `examples/keeper.conf.rendered` is what
 the plugin renders from it.
 
-Edit before use on another site: `VHID` (default 12, the LAN-side CARP VIP the backup
-reaches the master through) in `kc-ha-egress` (or set `KC_HA_VHID`) and `VIP_IF`/`VHID` in
-`kc-unbound-master`; `97-kc-jumbo-mtu` names the jumbo interfaces.
+On another site nothing in the scripts is edited: set `VHID` (default 12, the LAN-side
+CARP VIP the backup reaches the master through) and, if needed, `MASTER_ONLY_SERVICES`
+and `JUMBO_MTU_IFS` in `kc-ha.conf`.
 
 ## Boot-time false MASTER (known, partly mitigated)
 
@@ -169,6 +187,15 @@ sysctl net.inet.carp.demotion=-240    # relative counter: undo with the negative
   outbound NAT rule for the tunnel port.
 - Tailscale: with both nodes advertising the same subnets, the control plane may pick the
   backup as the active subnet router.
+- **Review of the first shared release against the second site** (3 static WANs, WAN2 on
+  `vtnet1`, reference VIP vhid 99, 26.1): `97-kc-jumbo-mtu` named `vtnet1` in the script
+  and `install.sh` ran it, which there would have re-initialised the active WAN at MTU
+  9000; `carp/20-kc-unbound-master` matched `12@*` literally, so Unbound was never
+  restarted on takeover; `check.sh` required pfsync `version=1500` (26.1 speaks 1400).
+  All three are config-driven now. The cellular backup gateway there is `192.168.4.1`:
+  `kc-ha-egress` and `check.sh` used to call any private default gateway unusable and
+  re-pin it on the next CARP event, undoing a WAN failover; a default route through a
+  *configured* upstream gateway is now accepted whatever its address.
 - Services that must run on one node only (UPnP/miniupnpd, mDNS/SSDP relay, ddclient):
   list them in `MASTER_ONLY_SERVICES` in `kc-ha.conf`. The service must be *enabled* in
   the config of **both** nodes (UPnP settings are not HA-synced; on the KC pair fw-b had

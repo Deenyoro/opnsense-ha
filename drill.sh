@@ -15,11 +15,12 @@
 #      even if this host loses the firewall.
 #   4. Reports losses per phase (failover / hold / failback) and the hook log lines.
 set -u
+SSH=${KC_HA_SSH:-ssh}   # override the ssh command as in install.sh
 [ $# -ge 2 ] || { echo "usage: $0 root@<master> root@<backup> [hold] [probe-ip] [dns-vip] [https-url]"; exit 2; }
 M=$1; B=$2; HOLD=${3:-25}; PIP=${4:-1.1.1.1}; DNSV=${5:-}; URL=${6:-https://www.google.com/generate_204}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
-st() { ssh "$1" '/usr/local/sbin/kc-ha-status --kv'; }
+st() { $SSH "$1" '/usr/local/sbin/kc-ha-status --kv'; }
 echo "== pre-flight"
 SM=$(st "$M"); SB=$(st "$B")
 g() { printf '%s\n' "$2" | sed -n "s/^$1=//p"; }
@@ -42,7 +43,7 @@ T0=$(date +%s)
   curl -s -o /dev/null --keepalive-time 5 --max-time 3 --rate 2/s -w '%{time_total} %{http_code} %{num_connects}\n' "$@" > "$tmp/https" 2>&1 ) & P4=$!
 sleep 5
 echo "== failover $(date +%T) (+$(( $(date +%s) - T0 ))s): demoting $M for ${HOLD}s, detached"
-ssh "$M" "daemon -f sh -c 'sysctl net.inet.carp.demotion=240; sleep $HOLD; sysctl net.inet.carp.demotion=-240'"
+$SSH "$M" "daemon -f sh -c 'sysctl net.inet.carp.demotion=240; sleep $HOLD; sysctl net.inet.carp.demotion=-240'"
 TF=$(date +%s)
 sleep $((HOLD + 20))
 TB=$((TF + HOLD))
@@ -59,5 +60,5 @@ SM=$(st "$M"); SB=$(st "$B")
 echo "  $(g host "$SM"): $(g masters "$SM") MASTER / $(g backups "$SM") BACKUP, demotion $(g demotion "$SM"), egress '$(g egress "$SM")', default $(g default "$SM")"
 echo "  $(g host "$SB"): $(g masters "$SB") MASTER / $(g backups "$SB") BACKUP, demotion $(g demotion "$SB"), egress '$(g egress "$SB")', default $(g default "$SB")"
 echo "== hook log (both nodes, since drill start)"
-for h in "$M" "$B"; do ssh "$h" "grep -h -E 'kc-ha-egress|kc-ha-dns|kc-ha-services|carp: [0-9]+@[^ ]*: (BACKUP -> MASTER|MASTER -> BACKUP)' /var/log/system/latest.log | awk -v t=\"$(date -u -d @$T0 +%Y-%m-%dT%H:%M 2>/dev/null)\" '1' | tail -8 | cut -c1-150"; done
+for h in "$M" "$B"; do $SSH "$h" "grep -h -E 'kc-ha-egress|kc-ha-dns|kc-ha-services|carp: [0-9]+@[^ ]*: (BACKUP -> MASTER|MASTER -> BACKUP)' /var/log/system/latest.log | awk -v t=\"$(date -u -d @$T0 +%Y-%m-%dT%H:%M 2>/dev/null)\" '1' | tail -8 | cut -c1-150"; done
 [ "$(g masters "$SM")" -gt 0 ] && [ "$(g backups "$SM")" = 0 ] && [ "$(g masters "$SB")" = 0 ] && echo "DRILL OK: failed over and back" || { echo "DRILL: pair not back in the expected state"; exit 1; }
