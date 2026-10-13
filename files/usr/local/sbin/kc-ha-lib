@@ -2,9 +2,46 @@
 # Shared helpers for the kc-ha scripts. Source it: . /usr/local/sbin/kc-ha-lib
 # Everything is read from /conf/config.xml and /usr/local/etc/kc-ha.conf, so the
 # same files work unchanged on every node of every site.
-VHID=12; BOOT_GRACE=120; MASTER_ONLY_SERVICES=""; JUMBO_MTU_IFS=""; JUMBO_MTU=9000
+#
+# Every setting has its default here and can be overridden in kc-ha.conf (each
+# one is described in kc-ha.conf.sample). Nothing else in this file, and nothing
+# in the other scripts and hooks, names a vhid, a device, an address, a service
+# or a timing: behaviour is changed in kc-ha.conf, never in the code.
+VHID=""                       # required: no default, the kit is inert without it
+BOOT_GRACE=120
+MASTER_ONLY_SERVICES=""
+JUMBO_MTU_IFS=""; JUMBO_MTU=9000
+PFSYNC_MAXUPD=8
+BACKUP_EGRESS=yes
+PIN_DEFAULT_ROUTE=yes
+UNUSABLE_DEFAULT_GWS="10.* 192.168.* 172.1[6-9].* 172.2[0-9].* 172.3[01].* 169.254.*"
+GW_PING_TIMEOUT_MS=700
+PEER_PING_TIMEOUT_MS=500
+UNBOUND_RESTART_ON_MASTER=yes
+DNS_CHECK_NAME=opnsense.org; DNS_CHECK_SERVER=127.0.0.1
+DNS_RESTART_TRIES=2; DNS_SETTLE=4; DNS_RETRY_WAIT=3
+EGRESS_HOOK_DELAY=2; SERVICES_HOOK_DELAY=3; SERVICES_BOOT_DELAY=15; SERVICE_SETTLE=1
+LOCK_TIMEOUT=30
+CHECK_STATE_TOLERANCE_PCT=20; CHECK_KEEPER_MAX_AGE=600
+CHECK_KEA_URL=http://127.0.0.1:8000/
+CHECK_MASTER_ONLY_ANCHORS=""  # default: the names in MASTER_ONLY_SERVICES
+CHECK_REPLY_TO_IFS=""         # default: every interface with an enabled upstream gateway
+CHECK_COMPARE_CONFIG="installedpackages/miniupnpd/config"; CHECK_COMPARE_IGNORE="overridewanip"
+DRILL_DEMOTION=240; DRILL_HOLD=25; DRILL_PROBE_IP=1.1.1.1
+DRILL_DNS_NAME=opnsense.org; DRILL_HTTPS_URL=https://www.google.com/generate_204
+KC_HA_SETTINGS="VHID BOOT_GRACE MASTER_ONLY_SERVICES JUMBO_MTU_IFS JUMBO_MTU PFSYNC_MAXUPD BACKUP_EGRESS PIN_DEFAULT_ROUTE UNUSABLE_DEFAULT_GWS GW_PING_TIMEOUT_MS PEER_PING_TIMEOUT_MS UNBOUND_RESTART_ON_MASTER DNS_CHECK_NAME DNS_CHECK_SERVER DNS_RESTART_TRIES DNS_SETTLE DNS_RETRY_WAIT EGRESS_HOOK_DELAY SERVICES_HOOK_DELAY SERVICES_BOOT_DELAY SERVICE_SETTLE LOCK_TIMEOUT CHECK_STATE_TOLERANCE_PCT CHECK_KEEPER_MAX_AGE CHECK_KEA_URL CHECK_MASTER_ONLY_ANCHORS CHECK_REPLY_TO_IFS CHECK_COMPARE_CONFIG CHECK_COMPARE_IGNORE DRILL_DEMOTION DRILL_HOLD DRILL_PROBE_IP DRILL_DNS_NAME DRILL_HTTPS_URL"
 [ -r /usr/local/etc/kc-ha.conf ] && . /usr/local/etc/kc-ha.conf
 VHID=${KC_HA_VHID:-$VHID}
+kc_ha_on() { case "$1" in yes|YES|1|on|true) return 0 ;; esac; return 1; }
+# "NAME=value" for every setting as it is in effect on this node
+kc_ha_settings() { for _v in $KC_HA_SETTINGS; do eval "printf '%s=%s\\n' \"$_v\" \"\$$_v\""; done; }
+# 0 if $1 is not usable as a default gateway by its address (missing, or matches UNUSABLE_DEFAULT_GWS)
+kc_ha_gw_unusable() {
+    [ -n "$1" ] || return 0
+    set -f
+    for _p in $UNUSABLE_DEFAULT_GWS; do case "$1" in $_p) set +f; return 0 ;; esac; done
+    set +f; return 1
+}
 
 # Sets: VIP IF (the reference CARP VIP and its device), PEER (pfsync peer IP),
 # GWS ("gw@device ..." upstream IPv4 gateways, best priority first).
@@ -33,6 +70,9 @@ PY
 )"
 }
 
+# 0 if $1 answers one of two pings within GW_PING_TIMEOUT_MS
+kc_ha_gw_alive() { /sbin/ping -q -c 1 -W "$GW_PING_TIMEOUT_MS" "$1" >/dev/null 2>&1 || /sbin/ping -q -c 1 -W "$GW_PING_TIMEOUT_MS" "$1" >/dev/null 2>&1; }
+
 # Device of a configured upstream gateway ("" if $1 is not one of them).
 kc_ha_gw_known() { for _g in $GWS; do [ "${_g%@*}" = "$1" ] && return 0; done; return 1; }
 kc_ha_gw_dev() { for _g in $GWS; do [ "${_g%@*}" = "$1" ] && { echo "${_g#*@}"; return 0; }; done; return 1; }
@@ -45,7 +85,7 @@ kc_ha_uptime() { echo $(( $(date +%s) - $(/sbin/sysctl -n kern.boottime | sed -n
 # 0 if the pfsync peer answers on the SYNC link (two quick pings).
 kc_ha_peer_alive() {
     [ -n "$PEER" ] || return 1
-    /sbin/ping -q -c 1 -W 500 "$PEER" >/dev/null 2>&1 || /sbin/ping -q -c 1 -W 500 "$PEER" >/dev/null 2>&1
+    /sbin/ping -q -c 1 -W "$PEER_PING_TIMEOUT_MS" "$PEER" >/dev/null 2>&1 || /sbin/ping -q -c 1 -W "$PEER_PING_TIMEOUT_MS" "$PEER" >/dev/null 2>&1
 }
 
 # A MASTER role we should act on: not within BOOT_GRACE of boot while the peer

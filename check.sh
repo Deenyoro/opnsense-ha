@@ -9,7 +9,8 @@ SSH=${KC_HA_SSH:-ssh}
 [ $# -eq 2 ] || { echo "usage: $0 root@<node-a> root@<node-b>"; exit 2; }
 here=$(cd "$(dirname "$0")" && pwd)
 version=$(cd "$here" && git describe --always --dirty 2>/dev/null || cat "$here/VERSION" 2>/dev/null || echo unknown)
-pkgver=$(basename "$(ls "$here"/plugins/os-carp-vip-dhcp/os-carp-vip-dhcp-*.pkg | head -1)" .pkg | sed 's/^os-carp-vip-dhcp-//')
+plugdir=${KC_HA_PLUGIN_DIR:-$here/plugins/os-carp-vip-dhcp}
+pkgbase=$(basename "$(ls "$plugdir"/*.pkg 2>/dev/null | head -1)" .pkg); pkgver=${pkgbase##*-}; pkgname=${pkgbase%-*}
 fails=0
 ok()   { echo "  ok   $*"; }
 fail() { echo "  FAIL $*"; fails=$((fails + 1)); }
@@ -17,10 +18,11 @@ warn() { echo "  warn $*"; }
 
 # One ssh per node; the remote side runs sh (login shell is csh). Prints KEY=VALUE lines.
 collect() {
-    $SSH "$1" 'sh -s' <<'REMOTE'
+    $SSH "$1" "PKGNAME='$pkgname' sh -s" <<'REMOTE'
 echo "hostname=$(hostname)"
 echo "version=$(opnsense-version -v)"
-echo "pkg=$(pkg query %v os-carp-vip-dhcp)"
+. /usr/local/sbin/kc-ha-lib 2>/dev/null
+echo "pkg=$(pkg query %v "$PKGNAME")"
 for f in /usr/local/sbin/kc-ha-lib /usr/local/sbin/kc-ha-egress /usr/local/sbin/kc-unbound-master /usr/local/sbin/kc-ha-master-services /usr/local/sbin/kc-ha-status \
          /usr/local/etc/rc.syshook.d/carp/10-kc-ha-egress /usr/local/etc/rc.syshook.d/carp/20-kc-unbound-master /usr/local/etc/rc.syshook.d/carp/30-kc-ha-master-services \
          /usr/local/etc/rc.syshook.d/start/95-pfsync-maxupd /usr/local/etc/rc.syshook.d/start/96-kc-ha-egress /usr/local/etc/rc.syshook.d/start/97-kc-jumbo-mtu /usr/local/etc/rc.syshook.d/start/98-kc-ha-master-services \
@@ -35,10 +37,13 @@ echo "keeper_last=$(grep -h 'INFO' /var/log/carpvipdhcp-*.log 2>/dev/null | tail
 echo "jumbo=$(. /usr/local/sbin/kc-ha-lib 2>/dev/null; for i in $JUMBO_MTU_IFS; do printf '%s=%s/%s ' "$i" "$(ifconfig "$i" 2>/dev/null | awk 'NR==1{for(n=1;n<=NF;n++) if($n=="mtu") print $(n+1)}')" "$JUMBO_MTU"; done)"
 echo "legacy=$(ls /usr/local/sbin/ha-master-services /usr/local/etc/rc.syshook.d/carp/30-ha-master-services /usr/local/etc/rc.syshook.d/start/98-ha-master-services /etc/cron.d/ha-master-services 2>/dev/null | tr '\n' ' ')"
 echo "wandevs=$(. /usr/local/sbin/kc-ha-lib 2>/dev/null; kc_ha_load 2>/dev/null; for g in $GWS; do printf '%s ' "${g#*@}"; done)"
-echo "kea=$(curl -s -m 3 -X POST -H 'Content-Type: application/json' -d '{"command":"status-get","service":["dhcp4"]}' http://127.0.0.1:8000/ | /usr/local/bin/python3 -c 'import sys,json; h=json.load(sys.stdin)[0]["arguments"]["high-availability"][0]["ha-servers"]; print(h["local"]["role"], h["local"]["state"], "remote", h["remote"]["last-state"], "in-touch", h["remote"]["in-touch"])' 2>/dev/null)"
+echo "kea=$(curl -s -m 3 -X POST -H 'Content-Type: application/json' -d '{"command":"status-get","service":["dhcp4"]}' "$CHECK_KEA_URL" | /usr/local/bin/python3 -c 'import sys,json; h=json.load(sys.stdin)[0]["arguments"]["high-availability"][0]["ha-servers"]; print(h["local"]["role"], h["local"]["state"], "remote", h["remote"]["last-state"], "in-touch", h["remote"]["in-touch"])' 2>/dev/null)"
 echo "carprules=$(pfctl -sr 2>/dev/null | grep -c 'proto carp')"
-# anchors of master-only services (e.g. miniupnpd) legitimately exist on the master only
-echo "rules=$(pfctl -sr 2>/dev/null | grep -v -E '^(nat-|rdr-)?anchor "(miniupnpd)"' | wc -l | tr -d ' ') nat=$(pfctl -sn 2>/dev/null | grep -v -E '^(nat-|rdr-)?anchor "(miniupnpd)"' | wc -l | tr -d ' ')"
+# anchors of master-only services legitimately exist on the master only
+# (CHECK_MASTER_ONLY_ANCHORS, default: the names in MASTER_ONLY_SERVICES)
+anch=$(echo ${CHECK_MASTER_ONLY_ANCHORS:-$MASTER_ONLY_SERVICES} | tr ' ' '|'); [ -n "$anch" ] || anch='-none-'
+echo "rules=$(pfctl -sr 2>/dev/null | grep -v -E "^(nat-|rdr-)?anchor \"($anch)\"" | wc -l | tr -d ' ') nat=$(pfctl -sn 2>/dev/null | grep -v -E "^(nat-|rdr-)?anchor \"($anch)\"" | wc -l | tr -d ' ')"
+export CHECK_REPLY_TO_IFS CHECK_COMPARE_CONFIG CHECK_COMPARE_IGNORE
 echo "hooks=$(ls /usr/local/etc/rc.syshook.d/carp /usr/local/etc/rc.syshook.d/start | sort | tr '\n' ' ')"
 echo "timedout=$(grep -h -c 'master timed out' /var/log/system/latest.log 2>/dev/null)"
 /usr/local/bin/python3 - <<'PY'
@@ -52,7 +57,14 @@ s=r.find("system"); print(" gw_switch_default=%s skip_rules_gw_down=%s" % (s.fin
 print("vips=" + ";".join("%s/%s/%s/skew%s" % (v.findtext("interface"),v.findtext("subnet"),v.findtext("vhid"),v.findtext("advskew")) for v in r.find("virtualip").iter("vip") if v.findtext("mode")=="carp"))
 print("sysctl=" + ";".join("%s=%s" % (i.findtext("tunable"), i.findtext("value")) for i in r.find("sysctl").iter("item") if (i.findtext("value") or "") not in ("", "default")))
 h=r.find("hasync"); print("hasync=pfsyncif=%s pfsyncversion=%s preempt_disabled=%s" % (h.findtext("pfsyncinterface"), h.findtext("pfsyncversion"), h.findtext("disablepreempt")))
-u=r.find("installedpackages/miniupnpd/config"); print("upnp=" + (";".join("%s=%s" % (c.tag, c.text or "") for c in u if c.tag != "overridewanip") if u is not None else "none"))
+import os
+ign=set(os.environ.get("CHECK_COMPARE_IGNORE","").split())
+cmpd=[]
+for path in os.environ.get("CHECK_COMPARE_CONFIG","").split():
+    u=r.find(path); cmpd.append(path+"{"+(";".join("%s=%s" % (c.tag, c.text or "") for c in u if c.tag not in ign) if u is not None else "none")+"}")
+print("cmpconfig=" + " ".join(cmpd))
+want=os.environ.get("CHECK_REPLY_TO_IFS","").split() or sorted({g.findtext("interface") for g in r.find("OPNsense/Gateways").iter("gateway_item") if (g.findtext("disabled") or "0")!="1" and (g.findtext("defaultgw") or "0")=="1" and (g.findtext("ipprotocol") or "inet")=="inet"})
+print("replyto=" + " ".join("%s:%s" % (i, "set" if (ifs.find(i) is not None and ifs.find(i).findtext("gateway")) else "MISSING") for i in want))
 print("keepers=%d" % len(list(r.find("OPNsense/CarpVipDhcp/keepers").iter("keeper"))) if r.find("OPNsense/CarpVipDhcp/keepers") is not None else "keepers=0")
 PY
 REMOTE
@@ -65,9 +77,9 @@ for n in A B; do
     host=$(get hostname "$D"); echo "== $host ($(get version "$D")) kc-ha $(get st:version "$D")"
     [ "$(get st:version "$D")" = "$version" ] && ok "kc-ha version $version" || warn "node has kc-ha '$(get st:version "$D")', repo is $version"
     if [ -z "${KC_HA_NO_PLUGIN:-}" ]; then
-        [ "$(get pkg "$D")" = "$pkgver" ] && ok "os-carp-vip-dhcp $pkgver" || fail "os-carp-vip-dhcp is '$(get pkg "$D")', repo has $pkgver"
+        [ "$(get pkg "$D")" = "$pkgver" ] && ok "$pkgname $pkgver" || fail "$pkgname is '$(get pkg "$D")', repo has $pkgver"
         case "$(get st:keeper "$D")" in *"is running"*) ok "keeper: $(get st:keeper "$D")" ;; *) fail "keeper not running" ;; esac
-        [ "$(get keeper_hb_age "$D")" -lt 600 ] 2>/dev/null && ok "keeper heartbeat $(get keeper_hb_age "$D")s old; last: $(get keeper_last "$D")" || fail "keeper heartbeat stale ($(get keeper_hb_age "$D")s): $(get keeper_last "$D")"
+        [ "$(get keeper_hb_age "$D")" -lt "$(get st:cfg:CHECK_KEEPER_MAX_AGE "$D")" ] 2>/dev/null && ok "keeper heartbeat $(get keeper_hb_age "$D")s old; last: $(get keeper_last "$D")" || fail "keeper heartbeat stale ($(get keeper_hb_age "$D")s): $(get keeper_last "$D")"
         [ "$(get keepers "$D")" -ge 1 ] 2>/dev/null && ok "$(get keepers "$D") keeper(s) configured" || fail "no keeper configured"
     fi
     for f in $(cd "$here/files" && find usr etc -type f | sort); do
@@ -76,7 +88,9 @@ for n in A B; do
     done
     [ -n "$(get conf "$D")" ] && ok "kc-ha.conf: $(get conf "$D")" || fail "no /usr/local/etc/kc-ha.conf"
     # the pfsync protocol version follows the OPNsense release (1400 on 26.1, 1500 on 26.7): only compared across the pair below
-    case "$(get st:pfsync "$D")" in "syncok=1 maxupd=8 version="?*) ok "pfsync $(get st:pfsync "$D")" ;; *) fail "pfsync: $(get st:pfsync "$D") (want syncok=1 maxupd=8)" ;; esac
+    mx=$(get st:cfg:PFSYNC_MAXUPD "$D")
+    case "$(get st:pfsync "$D")" in "syncok=1 maxupd=${mx:-?*} version="?*) ok "pfsync $(get st:pfsync "$D")" ;; *) fail "pfsync: $(get st:pfsync "$D") (want syncok=1${mx:+ maxupd=$mx})" ;; esac
+    [ -n "$(get st:cfg:VHID "$D")" ] || fail "VHID is not set in kc-ha.conf: the kit is inert on this node"
     [ "$(get st:demotion "$D")" = 0 ] && ok "carp demotion 0" || fail "carp demotion is $(get st:demotion "$D") (a drill left it set, or pfsync bulk stuck: check 'syncok')"
     [ "$(get st:preempt "$D")" = 1 ] && ok "carp preempt on" || fail "carp preempt off"
     [ "$(get st:maintenance "$D")" = 0 ] && ok "not in persistent CARP maintenance mode" || fail "persistent CARP maintenance mode is on"
@@ -99,17 +113,19 @@ for n in A B; do
     else fail "no CARP VIPs"; fi
     # a configured gateway may be private (CPE / cellular router LAN): judge it by its device, not its address
     dgw=${def%@*}; known=no; [ -n "$dgw" ] && case ";$(get gateways "$D");" in *"/$dgw/"*) known=yes ;; esac
-    [ "$known" = yes ] && dchk="configured" || dchk=$def
-    case "$dchk" in ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*) fail "default route is '${def:-none}'" ;;
+    bad=no; [ -z "$dgw" ] && bad=yes
+    if [ "$known" = no ]; then set -f; for pat in $(get st:cfg:UNUSABLE_DEFAULT_GWS "$D"); do case "$dgw" in $pat) bad=yes ;; esac; done; set +f; fi
+    case "$bad" in yes) fail "default route is '${def:-none}'" ;;
         *) dev=${def#*@}; gw=${def%@*}; want=$(printf '%s\n' "$(get devices "$D")" | tr ';' '\n' | sed -n "s/^$(printf '%s' "$(get gateways "$D")" | tr ';' '\n' | grep "/$gw/" | cut -d/ -f2)=//p")
            if [ -n "$want" ] && [ "$want" != "$dev" ]; then fail "default route $gw is on $dev, its WAN device is $want"; else ok "default route $def"; fi ;;
     esac
     case "$(get gateways "$D")" in *"/ks1/"*) fail "a gateway has kill-states on" ;; esac
     case "$(get gateways "$D")" in *"gw_switch_default=1"*) ok "gw_switch_default on" ;; *) warn "gw_switch_default off (no automatic WAN failover of the default route)" ;; esac
-    case "$(get ifgw "$D")" in *wan=*) ok "wan interface has its gateway set (reply-to)" ;; *) fail "wan interface has no gateway (no reply-to on WAN1 rules)" ;; esac
+    # reply-to needs the interface gateway on every WAN interface (CHECK_REPLY_TO_IFS, default: interfaces with an enabled upstream gateway)
+    for e in $(get replyto "$D"); do [ "${e#*:}" = set ] && ok "${e%%:*} interface has its gateway set (reply-to)" || fail "${e%%:*} interface has no gateway (no reply-to on its rules)"; done
 done
 echo "== pair"
-for k in devices ifgw gateways vips sysctl hasync hooks conf upnp; do   # (conf includes JUMBO_MTU_IFS)
+for k in devices ifgw gateways vips sysctl hasync hooks conf cmpconfig; do   # conf = every kc-ha.conf line; cmpconfig = CHECK_COMPARE_CONFIG sections
     va=$(get $k "$A"); vb=$(get $k "$B")
     case $k in
         vips) va=$(printf '%s' "$va" | sed 's/skew[0-9]*//g'); vb=$(printf '%s' "$vb" | sed 's/skew[0-9]*//g') ;;   # skew differs by design
@@ -121,7 +137,8 @@ pa=$(get st:pfsync "$A"); pb=$(get st:pfsync "$B")
 [ "${pa##*version=}" = "${pb##*version=}" ] && ok "same pfsync protocol version (${pa##*version=})" || fail "pfsync protocol versions differ: ${pa##*version=} vs ${pb##*version=}"
 [ "$(get rules "$A")" = "$(get rules "$B")" ] && ok "same loaded rule/NAT counts ($(get rules "$A"))" || fail "rule/NAT counts differ: $(get rules "$A") vs $(get rules "$B")"
 sa=$(get st:states "$A"); sb=$(get st:states "$B"); d=$((sa - sb)); [ $d -lt 0 ] && d=$((-d))
-[ $d -le $(( (sa + 1) / 5 )) ] && ok "state tables within 20% ($sa / $sb)" || fail "state tables differ a lot ($sa / $sb): pfsync not replicating?"
+tol=$(get st:cfg:CHECK_STATE_TOLERANCE_PCT "$A"); tol=${tol:-20}
+[ $((d * 100)) -le $(( (sa + 1) * tol )) ] && ok "state tables within ${tol}% ($sa / $sb)" || fail "state tables differ by more than ${tol}% ($sa / $sb): pfsync not replicating?"
 ma=$(get st:masters "$A"); mb=$(get st:masters "$B")
 [ "$ma" -gt 0 ] && [ "$mb" -gt 0 ] && fail "both nodes MASTER (split brain)"
 [ "$ma" -eq 0 ] && [ "$mb" -eq 0 ] && fail "no node is MASTER"

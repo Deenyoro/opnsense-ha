@@ -1,17 +1,17 @@
 #!/bin/sh
 # Jumbo frames for interfaces OPNsense does not size itself. Opt-in: does
-# nothing unless JUMBO_MTU_IFS is set in /usr/local/etc/kc-ha.conf, e.g. on the
-# KC pair  JUMBO_MTU_IFS="vtnet1 vtnet1_vlan12"  (MTU from JUMBO_MTU, default 9000).
+# nothing unless JUMBO_MTU_IFS is set in /usr/local/etc/kc-ha.conf (a parent
+# device and its VLAN; MTU from JUMBO_MTU).
 #
-# KC background: config.xml sets MTU 9000 on the parent (lan/vtnet1) and
-# ClusterVLAN (vtnet1_vlan12), but OPNsense does not apply the parent's MTU
-# because the 'lan' interface is disabled, so VLAN12 stays capped at 1500.
-# Nodes/backup120 use 9000, and oversized frames are then dropped on receive
+# Background (first site): config.xml sets MTU 9000 on a parent device and the
+# cluster VLAN on it, but OPNsense does not apply the parent's MTU because that
+# interface is disabled, so the VLAN stays capped at 1500. The hosts on it use
+# 9000, and oversized frames are then dropped on receive
 # (no ICMP), which hangs routed TLS/S3 traffic. 2026-09-25: Suricata IPS
 # (netmap) reset these to 1500 and caused an outage.
 #
 # The device names used to be written in this file. They are per site: on a
-# second site vtnet1 is the active WAN, and an MTU change re-inits the
+# second site the same device name is the active WAN, and an MTU change re-inits the
 # interface. So: names come from the config only, and a device that carries an
 # upstream gateway (a WAN) is refused whatever the config says.
 # Idempotent: only sets what differs. KC_HA_DRY=1 prints instead of acting.

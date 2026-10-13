@@ -1,11 +1,18 @@
 # kc-ha site settings. Copied to /usr/local/etc/kc-ha.conf by install.sh if that
 # file does not exist yet (it is never overwritten). Same content on both nodes.
+#
+# This file is the only place where behaviour is configured: no script or hook
+# carries a vhid, a device, an address, a service name or a timing. Every line
+# below shows the built-in default; delete a line to keep the default, change it
+# to override. `kc-ha-status --settings` prints what is in effect on a node.
 
+# --- required -----------------------------------------------------------------
 # vhid of the LAN-side CARP VIP that defines "the role of this node" and that
-# the BACKUP node reaches the master through (its VIP and device are looked up
-# in config.xml, so nothing else is hardcoded).
-VHID=12
+# the BACKUP node reaches the master through. Its address and device are looked
+# up in config.xml. Empty = the whole kit does nothing.
+VHID=
 
+# --- role handling ------------------------------------------------------------
 # Seconds after boot during which a MASTER event is not trusted while the peer
 # still answers on the SYNC link: a booting node can time out to MASTER before
 # it is able to hear the real master (seen in the field: ~30 s dual master).
@@ -15,10 +22,80 @@ BOOT_GRACE=120
 # Started on MASTER, stopped otherwise, by kc-ha-master-services. Names as
 # accepted by `pluginctl -s <name> status`, e.g. "udpbroadcastrelay ddclient".
 MASTER_ONLY_SERVICES=""
+# Seconds to wait after a start/stop before checking that it took.
+SERVICE_SETTLE=1
 
+# --- routing (kc-ha-egress) ---------------------------------------------------
+# yes: on the BACKUP node route 0/1 + 128/1 through the master's VIP so the
+# node itself has internet. no: never install those routes (removes them).
+BACKUP_EGRESS=yes
+# yes: keep the kernel default route on a usable upstream gateway and on that
+# gateway's device, on both roles. no: never touch the default route.
+PIN_DEFAULT_ROUTE=yes
+# A default gateway that is NOT one of the configured upstream gateways and
+# matches one of these shell patterns is treated as unusable and re-pinned (the
+# LAN VIP, a leftover). A configured upstream gateway is always accepted, even
+# a private one (cellular / CPE router LAN).
+UNUSABLE_DEFAULT_GWS="10.* 192.168.* 172.1[6-9].* 172.2[0-9].* 172.3[01].* 169.254.*"
+# Ping timeout (ms) when probing upstream gateways / the pfsync peer.
+GW_PING_TIMEOUT_MS=700
+PEER_PING_TIMEOUT_MS=500
+
+# --- DNS (kc-unbound-master) ---------------------------------------------------
+# yes: restart Unbound when this node becomes MASTER of the reference VIP.
+UNBOUND_RESTART_ON_MASTER=yes
+# Name and resolver used to verify resolution after the restart.
+DNS_CHECK_NAME=opnsense.org
+DNS_CHECK_SERVER=127.0.0.1
+# Restart attempts; seconds to wait before the first one (routes settle) and
+# after each restart before testing.
+DNS_RESTART_TRIES=2
+DNS_SETTLE=4
+DNS_RETRY_WAIT=3
+
+# --- boot hooks ---------------------------------------------------------------
+# pfsync0 maxupd set at boot (start/95-pfsync-maxupd). Empty = leave pfsync alone.
+PFSYNC_MAXUPD=8
 # Interfaces to force to JUMBO_MTU at boot (start/97-kc-jumbo-mtu), space
-# separated. Empty = the hook does nothing. Only for a VLAN whose disabled
-# parent OPNsense never sizes (KC pair: "vtnet1 vtnet1_vlan12"). Device names
-# are per site; a device that carries an upstream gateway (a WAN) is refused.
+# separated, e.g. a parent device and the VLAN on it whose MTU OPNsense does
+# not apply. Empty = the hook does nothing. Device names are per site; a device
+# that carries an upstream gateway (a WAN) is refused whatever is listed here.
 JUMBO_MTU_IFS=""
 JUMBO_MTU=9000
+
+# --- timing of the hooks ------------------------------------------------------
+# Seconds a CARP/boot hook waits before acting, so the role has settled.
+EGRESS_HOOK_DELAY=2
+SERVICES_HOOK_DELAY=3
+SERVICES_BOOT_DELAY=15
+# Seconds a script waits for another run of itself (one CARP transition fires
+# the hooks once per VIP; runs are serialised).
+LOCK_TIMEOUT=30
+
+# --- check.sh -----------------------------------------------------------------
+# Allowed difference between the two state tables, percent.
+CHECK_STATE_TOLERANCE_PCT=20
+# Maximum age of the carp-vip-dhcp keeper heartbeat, seconds.
+CHECK_KEEPER_MAX_AGE=600
+# Kea control agent used for the Kea HA check.
+CHECK_KEA_URL=http://127.0.0.1:8000/
+# pf anchors that exist on the master only and are left out of the rule-count
+# comparison. Empty = the names in MASTER_ONLY_SERVICES.
+CHECK_MASTER_ONLY_ANCHORS=""
+# Logical interfaces (wan, opt3, ...) that must have their interface gateway
+# set, for reply-to. Empty = every interface with an enabled upstream gateway.
+CHECK_REPLY_TO_IFS=""
+# config.xml sections that HA sync does not carry and that must be identical on
+# both nodes (space separated paths), and element names to ignore inside them.
+CHECK_COMPARE_CONFIG="installedpackages/miniupnpd/config"
+CHECK_COMPARE_IGNORE="overridewanip"
+
+# --- drill.sh (defaults for arguments left out) ---------------------------------
+# CARP demotion applied to the master for the drill, and how long it is held.
+DRILL_DEMOTION=240
+DRILL_HOLD=25
+# Probes: address pinged through the firewall, name resolved at the VIP, URL
+# fetched over one persistent connection.
+DRILL_PROBE_IP=1.1.1.1
+DRILL_DNS_NAME=opnsense.org
+DRILL_HTTPS_URL=https://www.google.com/generate_204

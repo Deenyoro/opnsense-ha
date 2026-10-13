@@ -1,8 +1,11 @@
 #!/bin/sh
 # HA: keep standby TCP state windows fresh so connections survive a planned
-# failover (default maxupd 128 left them too stale; tested 2026-09-23).
+# failover (default maxupd 128 left them too stale; tested 2026-09-23 with 8).
+# The value is PFSYNC_MAXUPD in kc-ha.conf; empty = leave pfsync alone.
 # Idempotent: changing maxupd restarts pfsync's bulk sync, which demotes CARP
 # for ~1 s (a MASTER would hand over and preempt back), so only touch it when
 # the value really differs.
+. /usr/local/sbin/kc-ha-lib
+[ -n "$PFSYNC_MAXUPD" ] || exit 0
 cur=$(/sbin/ifconfig pfsync0 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="maxupd:") print $(i+1)}')
-[ "$cur" = 8 ] || /sbin/ifconfig pfsync0 maxupd 8
+[ "$cur" = "$PFSYNC_MAXUPD" ] || /sbin/ifconfig pfsync0 maxupd "$PFSYNC_MAXUPD"

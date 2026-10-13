@@ -12,10 +12,10 @@
 # bootup configure hook, scoped to that plugin: `pluginctl -c bootup:<svc>`
 # (renders the config and starts). A start that still fails is logged as an error.
 # one at a time: a CARP transition fires the hook once per VIP
-if [ -z "$KC_HA_LOCKED" ]; then
-    KC_HA_LOCKED=1 exec /usr/bin/lockf -t 30 /var/run/kc-ha-master-services.lock /bin/sh "$0" "$@"
-fi
 . /usr/local/sbin/kc-ha-lib
+if [ -z "${KC_HA_LOCKED:-}" ]; then
+    KC_HA_LOCKED=1 exec /usr/bin/lockf -t "$LOCK_TIMEOUT" /var/run/kc-ha-master-services.lock /bin/sh "$0" "$@"
+fi
 [ -n "$MASTER_ONLY_SERVICES" ] || exit 0
 kc_ha_load
 [ -n "$IF" ] || exit 0
@@ -28,14 +28,14 @@ state() { case "$(/usr/local/sbin/pluginctl -s "$1" status 2>/dev/null)" in *"is
 for svc in $MASTER_ONLY_SERVICES; do
     [ "$(state "$svc")" = "$want" ] && continue
     if [ "$want" = running ]; then
-        /usr/local/sbin/pluginctl -s "$svc" start >/dev/null 2>&1; sleep 1
+        /usr/local/sbin/pluginctl -s "$svc" start >/dev/null 2>&1; sleep "$SERVICE_SETTLE"
         if [ "$(state "$svc")" != running ]; then
-            /usr/local/sbin/pluginctl -c "bootup:$svc" >/dev/null 2>&1; sleep 1
+            /usr/local/sbin/pluginctl -c "bootup:$svc" >/dev/null 2>&1; sleep "$SERVICE_SETTLE"
         fi
         if [ "$(state "$svc")" = running ]; then logger -t kc-ha-services "MASTER: started $svc"
         else logger -p daemon.err -t kc-ha-services "MASTER: FAILED to start $svc (is it enabled in this node's config?)"; fi
     else
-        /usr/local/sbin/pluginctl -s "$svc" stop >/dev/null 2>&1; sleep 1
+        /usr/local/sbin/pluginctl -s "$svc" stop >/dev/null 2>&1; sleep "$SERVICE_SETTLE"
         if [ "$(state "$svc")" = stopped ]; then logger -t kc-ha-services "${role:-no-carp}: stopped $svc"
         else logger -p daemon.err -t kc-ha-services "${role:-no-carp}: FAILED to stop $svc"; fi
     fi

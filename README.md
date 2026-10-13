@@ -51,22 +51,49 @@ CrowdSec, Tailscale, interface settings. `install.sh` covers the hook/script par
 | `kc-unbound-master` | Unbound restart on a trusted MASTER event |
 | `kc-ha-master-services` | start/stop `MASTER_ONLY_SERVICES` by role (carp hook, boot, cron every 2 min) |
 | `kc-ha-status` | one-screen status of a node (`--kv` for scripts) |
-| `files/usr/local/etc/kc-ha.conf.sample` | site settings: `VHID`, `BOOT_GRACE`, `MASTER_ONLY_SERVICES`, `JUMBO_MTU_IFS`; copied to `kc-ha.conf` once |
+| `files/usr/local/etc/kc-ha.conf.sample` | every setting with its default and what it does; copied to `kc-ha.conf` once |
 | `install.sh` | idempotent install of plugin + files + version stamp, then live apply and status |
 | `check.sh` | acceptance test of the pair (below) |
 | `drill.sh` | controlled failover/failback with probes of existing flows |
 
-Nothing is hardcoded per node or per site: the same files are installed unchanged on
-every node of every site; only `kc-ha.conf` (identical on both nodes) carries site
-choices. No script or hook names a vhid, a VIP or a device.
+Nothing is hardcoded: the same files are installed unchanged on every node of every
+site, and `kc-ha.conf` (identical on both nodes) is the only place where behaviour is
+set. No script or hook names a vhid, a VIP, a device, an address, a service or a timing;
+the defaults all sit in one block at the top of `kc-ha-lib` and every one can be
+overridden.
+
+### Settings (`kc-ha.conf`)
+
+| Setting | Default | What it controls |
+|---|---|---|
+| `VHID` | *(none, required)* | reference LAN-side CARP VIP; empty = kit inert |
+| `BOOT_GRACE` | 120 | seconds after boot a MASTER event is distrusted while the peer is alive |
+| `MASTER_ONLY_SERVICES`, `SERVICE_SETTLE` | empty, 1 | services run on the master only; wait before verifying a start/stop |
+| `BACKUP_EGRESS` | yes | 0/1 + 128/1 routes via the master on the BACKUP node |
+| `PIN_DEFAULT_ROUTE` | yes | keep the default route on a usable upstream gateway and its device |
+| `UNUSABLE_DEFAULT_GWS` | RFC 1918 + link-local patterns | unconfigured default gateways treated as unusable |
+| `GW_PING_TIMEOUT_MS`, `PEER_PING_TIMEOUT_MS` | 700, 500 | probe timeouts |
+| `UNBOUND_RESTART_ON_MASTER` | yes | restart Unbound on takeover |
+| `DNS_CHECK_NAME`, `DNS_CHECK_SERVER`, `DNS_RESTART_TRIES`, `DNS_SETTLE`, `DNS_RETRY_WAIT` | opnsense.org, 127.0.0.1, 2, 4, 3 | how resolution is verified after the restart |
+| `PFSYNC_MAXUPD` | 8 | `pfsync0 maxupd` at boot; empty = leave it |
+| `JUMBO_MTU_IFS`, `JUMBO_MTU` | empty, 9000 | interfaces forced to a jumbo MTU at boot; WAN devices refused |
+| `EGRESS_HOOK_DELAY`, `SERVICES_HOOK_DELAY`, `SERVICES_BOOT_DELAY`, `LOCK_TIMEOUT` | 2, 3, 15, 30 | hook timing |
+| `CHECK_*` | see sample | `check.sh`: state tolerance, keeper age, Kea URL, master-only anchors, reply-to interfaces, config sections compared across nodes |
+| `DRILL_*` | see sample | `drill.sh`: demotion, hold, probe address, DNS name, HTTPS URL |
+
+`kc-ha-status --settings` prints what is in effect on a node; `check.sh` fails if the
+two nodes' `kc-ha.conf` differ. The cron interval of `kc-ha-master-services` is the one
+value kept in a file of its own (`/etc/cron.d/kc-ha-master-services`), because cron reads
+it from there.
 
 ### First install on a new site
 
 1. Create `/usr/local/etc/kc-ha.conf` on **both** nodes before (or right after) the first
    `install.sh`: `VHID` = the LAN-side CARP VIP the backup reaches the master through,
-   `MASTER_ONLY_SERVICES` if any, `JUMBO_MTU_IFS` only if you have such a VLAN. With the
-   sample `VHID=12` on a site that has no vhid 12 the kit does nothing and `install.sh`
-   says so.
+   `MASTER_ONLY_SERVICES` if any, `JUMBO_MTU_IFS` only if you have such a VLAN. `VHID`
+   has no default: until it is set the kit does nothing and `install.sh` and `check.sh`
+   say so. A node upgraded from a release that kept the vhid or the jumbo interface
+   names inside the scripts gets them carried into `kc-ha.conf` by `install.sh`.
 2. `KC_HA_NO_PLUGIN=1` if no WAN is DHCP.
 3. `KC_HA_SSH="..."` if the workstation reaches the nodes through a jump host or with a
    password (`install.sh`, `check.sh` and `drill.sh` all honour it). Without git on the
@@ -123,9 +150,7 @@ Then in the GUI (synced by HA): Services > CARP VIP DHCP > add a keeper for the 
 VIP as in `examples/carpvipdhcp-settings.xml`; `examples/keeper.conf.rendered` is what
 the plugin renders from it.
 
-On another site nothing in the scripts is edited: set `VHID` (default 12, the LAN-side
-CARP VIP the backup reaches the master through) and, if needed, `MASTER_ONLY_SERVICES`
-and `JUMBO_MTU_IFS` in `kc-ha.conf`.
+On another site nothing in the scripts is edited: everything is set in `kc-ha.conf`.
 
 ## Boot-time false MASTER (known, partly mitigated)
 
@@ -191,8 +216,9 @@ sysctl net.inet.carp.demotion=-240    # relative counter: undo with the negative
   `vtnet1`, reference VIP vhid 99, 26.1): `97-kc-jumbo-mtu` named `vtnet1` in the script
   and `install.sh` ran it, which there would have re-initialised the active WAN at MTU
   9000; `carp/20-kc-unbound-master` matched `12@*` literally, so Unbound was never
-  restarted on takeover; `check.sh` required pfsync `version=1500` (26.1 speaks 1400).
-  All three are config-driven now. The cellular backup gateway there is `192.168.4.1`:
+  restarted on takeover; `check.sh` required pfsync `version=1500` (26.1 speaks 1400)
+  and a gateway on the interface named `wan`. None of these, nor any timing, address or
+  name, is written in the code any more: see Settings above. The cellular backup gateway there is `192.168.4.1`:
   `kc-ha-egress` and `check.sh` used to call any private default gateway unusable and
   re-pin it on the next CARP event, undoing a WAN failover; a default route through a
   *configured* upstream gateway is now accepted whatever its address.

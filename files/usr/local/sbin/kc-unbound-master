@@ -2,13 +2,16 @@
 # KC HA: after this node becomes CARP MASTER, restart Unbound so it drops any
 # upstream failures it cached while it was BACKUP (seen in the failover test:
 # the new master answered SERVFAIL until Unbound was restarted), then verify
-# resolution and retry once. Only acts for the reference VIP (kc-ha.conf VHID)
+# resolution and retry. Only acts for the reference VIP (kc-ha.conf VHID)
 # so one failover triggers one restart, not one per VIP. Logs to syslog
 # (kc-ha-dns). Ignores the boot-time false MASTER (kc_ha_master_trusted).
 #
 # Usage: kc-unbound-master [<vhid>@<iface>]   (the carp hook passes its event;
 # events of other VIPs exit here, before config.xml is parsed)
+# Settings (kc-ha.conf): UNBOUND_RESTART_ON_MASTER, DNS_CHECK_NAME,
+# DNS_CHECK_SERVER, DNS_RESTART_TRIES, DNS_SETTLE, DNS_RETRY_WAIT, BOOT_GRACE.
 . /usr/local/sbin/kc-ha-lib
+kc_ha_on "$UNBOUND_RESTART_ON_MASTER" || exit 0
 [ -z "${1:-}" ] || [ "${1%%@*}" = "$VHID" ] || exit 0
 kc_ha_load
 [ -n "$IF" ] || exit 0
@@ -17,12 +20,14 @@ if ! kc_ha_master_trusted; then
     logger -t kc-ha-dns "MASTER event $(kc_ha_uptime)s after boot while peer $PEER is alive: ignored (boot grace ${BOOT_GRACE}s)"
     exit 0
 fi
-sleep 4    # let kc-ha-egress settle the routes first
-ok() { /usr/bin/drill -Q opnsense.org @127.0.0.1 2>/dev/null | grep -qE '^[0-9a-f:.]+$'; }
-for try in 1 2; do
+sleep "$DNS_SETTLE"    # let kc-ha-egress settle the routes first
+ok() { /usr/bin/drill -Q "$DNS_CHECK_NAME" @"$DNS_CHECK_SERVER" 2>/dev/null | grep -qE '^[0-9a-f:.]+$'; }
+try=1
+while [ "$try" -le "$DNS_RESTART_TRIES" ]; do
     /usr/local/sbin/configctl unbound restart >/dev/null 2>&1
-    sleep 3
+    sleep "$DNS_RETRY_WAIT"
     if ok; then logger -t kc-ha-dns "MASTER: unbound restarted, resolving ok (try $try)"; exit 0; fi
+    try=$((try + 1))
 done
-logger -p daemon.err -t kc-ha-dns "MASTER: unbound restarted twice but still NOT resolving"
+logger -p daemon.err -t kc-ha-dns "MASTER: unbound restarted $DNS_RESTART_TRIES time(s) but still NOT resolving $DNS_CHECK_NAME @$DNS_CHECK_SERVER"
 exit 1

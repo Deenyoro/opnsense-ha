@@ -1,5 +1,7 @@
 #!/bin/sh
-# One-screen HA status of this node. Machine-readable with --kv.
+# One-screen HA status of this node. Machine-readable with --kv (status plus
+# every kc-ha.conf setting in effect as cfg:NAME=value); --settings prints only
+# the settings.
 . /usr/local/sbin/kc-ha-lib
 kc_ha_load
 role=$(kc_ha_role)
@@ -12,13 +14,15 @@ states=$(/sbin/pfctl -si 2>/dev/null | awk '/current entries/ {print $3}')
 dem=$(/sbin/sysctl -n net.inet.carp.demotion); pre=$(/sbin/sysctl -n net.inet.carp.preempt); pdf=$(/sbin/sysctl -n net.pfsync.carp_demotion_factor)
 maint=$(grep -c '<carp_maintenance' /conf/config.xml 2>/dev/null)
 peer=down; kc_ha_peer_alive && peer=alive
-gwst=$(for g in $GWS; do /sbin/ping -q -c 1 -W 500 "${g%@*}" >/dev/null 2>&1 && printf '%s:up ' "${g%@*}" || printf '%s:noping ' "${g%@*}"; done)
+gwst=$(for g in $GWS; do /sbin/ping -q -c 1 -W "$GW_PING_TIMEOUT_MS" "${g%@*}" >/dev/null 2>&1 && printf '%s:up ' "${g%@*}" || printf '%s:noping ' "${g%@*}"; done)
 svcs=$(for s in $MASTER_ONLY_SERVICES; do case "$(/usr/local/sbin/pluginctl -s "$s" status 2>/dev/null)" in *"is running"*) printf '%s:running ' "$s" ;; *) printf '%s:stopped ' "$s" ;; esac; done)
 keeper=$(/usr/local/etc/rc.d/carpvipdhcp status 2>/dev/null | head -1)
 ver=$(cat /usr/local/etc/kc-ha.version 2>/dev/null)
-if [ "$1" = "--kv" ]; then
+if [ "${1:-}" = "--settings" ]; then kc_ha_settings; exit 0; fi
+if [ "${1:-}" = "--kv" ]; then
     printf 'vip=%s\nvhid=%s\nhost=%s\nrole=%s\nmasters=%s\nbackups=%s\ndemotion=%s\npreempt=%s\npfsync_demotion_factor=%s\nmaintenance=%s\npfsync=%s\nstates=%s\ndefault=%s\negress=%s\npeer=%s\nuptime=%s\ngateways=%s\nservices=%s\nkeeper=%s\nversion=%s\n' \
         "$VIP" "$VHID" "$(hostname)" "$role" "$nm" "$nb" "$dem" "$pre" "$pdf" "$maint" "$pfs" "$states" "$def" "$egress" "$peer" "$(kc_ha_uptime)" "$gwst" "$svcs" "$keeper" "$ver"
+    kc_ha_settings | sed 's/^/cfg:/'
     exit 0
 fi
 cat <<EOT

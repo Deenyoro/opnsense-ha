@@ -7,24 +7,30 @@
 #
 # What it does:
 #   1. Pre-flight: master has all VIPs MASTER, backup all BACKUP, demotion 0 on both.
-#   2. Starts the probes from THIS host: 1 s ping to probe-ip (default 1.1.1.1, through
+#   2. Starts the probes from THIS host: 1 s ping to probe-ip (through
 #      the firewall), DNS at dns-vip every 1 s, a keep-alive HTTPS request every 0.5 s
-#      on one persistent connection (https-url; default https://www.google.com/generate_204).
+#      on one persistent connection (https-url).
 #   3. On the master, DETACHED (daemon -f, the ssh session may ride an address that
-#      moves): demotion +240, hold, demotion -240. So the drill fails back on its own
+#      moves): demotion +N, hold, demotion -N. So the drill fails back on its own
 #      even if this host loses the firewall.
 #   4. Reports losses per phase (failover / hold / failback) and the hook log lines.
+# Arguments left out are taken from the master's kc-ha.conf: DRILL_HOLD,
+# DRILL_PROBE_IP, DRILL_HTTPS_URL, plus DRILL_DEMOTION and DRILL_DNS_NAME.
 set -u
 SSH=${KC_HA_SSH:-ssh}   # override the ssh command as in install.sh
 [ $# -ge 2 ] || { echo "usage: $0 root@<master> root@<backup> [hold] [probe-ip] [dns-vip] [https-url]"; exit 2; }
-M=$1; B=$2; HOLD=${3:-25}; PIP=${4:-1.1.1.1}; DNSV=${5:-}; URL=${6:-https://www.google.com/generate_204}
+M=$1; B=$2; HOLD=${3:-}; PIP=${4:-}; DNSV=${5:-}; URL=${6:-}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 st() { $SSH "$1" '/usr/local/sbin/kc-ha-status --kv'; }
 echo "== pre-flight"
 SM=$(st "$M"); SB=$(st "$B")
 g() { printf '%s\n' "$2" | sed -n "s/^$1=//p"; }
-[ -z "$DNSV" ] && DNSV=$(g vip "$SM")
+# defaults for everything not given on the command line come from the master's kc-ha.conf (DRILL_*)
+[ -n "$HOLD" ] || HOLD=$(g cfg:DRILL_HOLD "$SM"); [ -n "$PIP" ] || PIP=$(g cfg:DRILL_PROBE_IP "$SM")
+[ -n "$URL" ] || URL=$(g cfg:DRILL_HTTPS_URL "$SM"); [ -n "$DNSV" ] || DNSV=$(g vip "$SM")
+DEM=$(g cfg:DRILL_DEMOTION "$SM"); DNSN=$(g cfg:DRILL_DNS_NAME "$SM")
+[ -n "$HOLD" ] && [ -n "$PIP" ] && [ -n "$URL" ] && [ -n "$DEM" ] && [ -n "$DNSN" ] || { echo "  could not read DRILL_* settings from $M (kc-ha-status --kv); is the kit installed?"; exit 1; }
 bad=0
 [ "$(g backups "$SM")" = 0 ] && [ "$(g masters "$SM")" -gt 0 ] || { echo "  $M is not MASTER on all VIPs ($(g masters "$SM")/$(g backups "$SM"))"; bad=1; }
 [ "$(g masters "$SB")" = 0 ] && [ "$(g backups "$SB")" -gt 0 ] || { echo "  $B is not BACKUP on all VIPs ($(g masters "$SB")/$(g backups "$SB"))"; bad=1; }
@@ -37,13 +43,13 @@ echo "  probes: ping $PIP, dns @$DNSV, https $URL"
 echo "== probes start $(date +%T)"
 T0=$(date +%s)
 ( ping -c $((HOLD + 30)) -i 1 -W 1 "$PIP" > "$tmp/ping" 2>&1 ) & P1=$!
-( while :; do s=$(date +%s.%N); if dig +time=1 +tries=1 @"$DNSV" opnsense.org A >/dev/null 2>&1; then echo "$s ok"; else echo "$s FAIL"; fi; sleep 1; done > "$tmp/dns" ) & P2=$!
+( while :; do s=$(date +%s.%N); if dig +time=1 +tries=1 @"$DNSV" "$DNSN" A >/dev/null 2>&1; then echo "$s ok"; else echo "$s FAIL"; fi; sleep 1; done > "$tmp/dns" ) & P2=$!
 # one persistent HTTPS connection: curl reuses the connection across URLs given in one invocation
 ( n=$(( (HOLD + 30) * 2 )); set --; i=0; while [ $i -lt $n ]; do set -- "$@" "$URL"; i=$((i+1)); done
   curl -s -o /dev/null --keepalive-time 5 --max-time 3 --rate 2/s -w '%{time_total} %{http_code} %{num_connects}\n' "$@" > "$tmp/https" 2>&1 ) & P4=$!
 sleep 5
 echo "== failover $(date +%T) (+$(( $(date +%s) - T0 ))s): demoting $M for ${HOLD}s, detached"
-$SSH "$M" "daemon -f sh -c 'sysctl net.inet.carp.demotion=240; sleep $HOLD; sysctl net.inet.carp.demotion=-240'"
+$SSH "$M" "daemon -f sh -c 'sysctl net.inet.carp.demotion=$DEM; sleep $HOLD; sysctl net.inet.carp.demotion=-$DEM'"
 TF=$(date +%s)
 sleep $((HOLD + 20))
 TB=$((TF + HOLD))

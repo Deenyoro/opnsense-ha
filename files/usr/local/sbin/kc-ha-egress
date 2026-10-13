@@ -28,8 +28,9 @@
 # is left alone, so a WAN failover OPNsense has already made is not undone by a
 # CARP event. Only a default route that is missing, or points at an address that
 # is not a configured gateway and is private/link-local (the LAN VIP, a leftover),
-# is treated as unusable. A public gateway that is not in the list (a dynamic
-# DHCP gateway) is left alone as before.
+# is treated as unusable (the address patterns are UNUSABLE_DEFAULT_GWS). A
+# gateway outside those patterns that is not in the list (a dynamic DHCP gateway)
+# is left alone as before.
 #
 # BACKUP: additionally route 0/1 + 128/1 via the master's LAN VIP so this
 # node's own traffic (updates, CrowdSec, NTP) works; removed on MASTER.
@@ -37,16 +38,22 @@
 # Serialised with lockf: one CARP transition fires this once per VIP.
 #
 # Usage: kc-ha-egress [--dry-run|--show]
-LOCK=/var/run/kc-ha-egress.lock
-DRY=0; case "$1" in --dry-run|--show) DRY=1 ;; esac
-if [ "$DRY" = 0 ] && [ -z "$KC_HA_LOCKED" ]; then
-    KC_HA_LOCKED=1 exec /usr/bin/lockf -t 30 "$LOCK" /bin/sh "$0" "$@"
-fi
+#
+# Settings (kc-ha.conf): VHID, BACKUP_EGRESS (the /1 routes), PIN_DEFAULT_ROUTE,
+# UNUSABLE_DEFAULT_GWS, GW_PING_TIMEOUT_MS, LOCK_TIMEOUT.
 . /usr/local/sbin/kc-ha-lib
+LOCK=/var/run/kc-ha-egress.lock
+DRY=0; case "${1:-}" in --dry-run|--show) DRY=1 ;; esac
+if [ "$DRY" = 0 ] && [ -z "${KC_HA_LOCKED:-}" ]; then
+    KC_HA_LOCKED=1 exec /usr/bin/lockf -t "$LOCK_TIMEOUT" "$LOCK" /bin/sh "$0" "$@"
+fi
 log() { [ "$DRY" = 1 ] && echo "$*" || /usr/bin/logger -t kc-ha-egress "$*"; }
 run() { [ "$DRY" = 1 ] && echo "+ $*" || "$@"; }
 
 kc_ha_load
+if [ -z "$VHID" ]; then
+    log "VHID is not set in /usr/local/etc/kc-ha.conf; nothing to do"; exit 0
+fi
 if [ -z "$VIP" ] || [ -z "$IF" ]; then
     log "no CARP VIP with vhid $VHID in config; nothing to do"; exit 0
 fi
@@ -55,14 +62,16 @@ have=$(/usr/bin/netstat -rn -f inet | awk '$1=="0.0.0.0/1"||$1=="128.0.0.0/1"' |
 curdef=${KC_HA_TEST_DEF-$(/usr/bin/netstat -rn -f inet | awk '$1=="default"{print $2; exit}')}   # KC_HA_TEST_DEF: test hook for --dry-run
 curdev=${KC_HA_TEST_DEV-$(/usr/bin/netstat -rn -f inet | awk '$1=="default"{print $4; exit}')}
 
-if [ "$1" = "--show" ]; then
+if [ "${1:-}" = "--show" ]; then
     echo "role=$role vip=$VIP if=$IF vhid=$VHID peer=$PEER uptime=$(kc_ha_uptime)s egress_routes=$have default=${curdef:-none}@${curdev:-none} upstream_by_priority=[$GWS]"
-    for g in $GWS; do /sbin/ping -q -c 1 -W 700 "${g%@*}" >/dev/null 2>&1 && echo "  ${g%@*} (${g#*@}) answers ping" || echo "  ${g%@*} (${g#*@}) no ping reply"; done
+    echo "  settings: backup_egress=$BACKUP_EGRESS pin_default_route=$PIN_DEFAULT_ROUTE unusable_default_gws=[$UNUSABLE_DEFAULT_GWS]"
+    for g in $GWS; do /sbin/ping -q -c 1 -W "$GW_PING_TIMEOUT_MS" "${g%@*}" >/dev/null 2>&1 && echo "  ${g%@*} (${g#*@}) answers ping" || echo "  ${g%@*} (${g#*@}) no ping reply"; done
     exit 0
 fi
 
-case "$role" in
-    BACKUP)
+want_egress=no; [ "$role" = BACKUP ] && kc_ha_on "$BACKUP_EGRESS" && want_egress=yes
+case "$want_egress" in
+    yes)
         if [ "$have" != 2 ]; then
             run /sbin/route -q delete -net 0.0.0.0/1 >/dev/null 2>&1
             run /sbin/route -q delete -net 128.0.0.0/1 >/dev/null 2>&1
@@ -78,24 +87,21 @@ case "$role" in
 esac
 
 # Decide whether the default route needs (re)pinning.
+kc_ha_on "$PIN_DEFAULT_ROUTE" || exit 0
 repin=no
 if [ -n "$curdef" ] && kc_ha_gw_known "$curdef"; then
     # a configured upstream gateway (public or private): only the device can be wrong
     want=$(kc_ha_gw_dev "$curdef")
     [ -n "$want" ] && [ "$curdev" != "$want" ] && repin=yes
 else
-    case "$curdef" in
-        ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*) repin=yes ;;
-    esac
+    kc_ha_gw_unusable "$curdef" && repin=yes
 fi
 [ "$repin" = yes ] || exit 0
 
 pick=""
 if [ "$role" = MASTER ]; then
     for g in $GWS; do
-        if /sbin/ping -q -c 1 -W 700 "${g%@*}" >/dev/null 2>&1 || /sbin/ping -q -c 1 -W 700 "${g%@*}" >/dev/null 2>&1; then
-            pick=$g; break
-        fi
+        if kc_ha_gw_alive "${g%@*}"; then pick=$g; break; fi
     done
     [ -z "$pick" ] && [ -n "$GWS" ] && log "MASTER: no upstream gateway answered ping, using first by priority"
 fi

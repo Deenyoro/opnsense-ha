@@ -1,3 +1,4 @@
 #!/bin/sh
-# CARP event hook -> reconcile backup egress (after a moment, so the role has settled)
-( sleep 2; /usr/local/sbin/kc-ha-egress ) >/dev/null 2>&1 &
+# boot -> reconcile backup egress (after EGRESS_HOOK_DELAY, so the role has settled)
+. /usr/local/sbin/kc-ha-lib
+( sleep "$EGRESS_HOOK_DELAY"; /usr/local/sbin/kc-ha-egress ) >/dev/null 2>&1 &

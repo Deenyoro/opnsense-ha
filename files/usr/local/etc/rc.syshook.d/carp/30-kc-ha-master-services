@@ -1,4 +1,5 @@
 #!/bin/sh
-# CARP event -> start/stop the master-only services once the role has settled
-( sleep 3; /usr/local/sbin/kc-ha-master-services ) >/dev/null 2>&1 &
+# CARP event -> start/stop the master-only services once the role has settled (SERVICES_HOOK_DELAY)
+. /usr/local/sbin/kc-ha-lib
+( sleep "$SERVICES_HOOK_DELAY"; /usr/local/sbin/kc-ha-master-services ) >/dev/null 2>&1 &
 exit 0
