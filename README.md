@@ -78,7 +78,7 @@ overridden.
 | `PFSYNC_MAXUPD` | 8 | `pfsync0 maxupd` at boot; empty = leave it |
 | `JUMBO_MTU_IFS`, `JUMBO_MTU` | empty, 9000 | interfaces forced to a jumbo MTU at boot; WAN devices refused |
 | `EGRESS_HOOK_DELAY`, `SERVICES_HOOK_DELAY`, `SERVICES_BOOT_DELAY`, `LOCK_TIMEOUT` | 2, 3, 15, 30 | hook timing |
-| `CHECK_*` | see sample | `check.sh`: state tolerance, keeper age, Kea URL, master-only anchors, reply-to interfaces, config sections compared across nodes |
+| `CHECK_*` | see sample | `check.sh`: state tolerance, keeper age, Kea URL, master-only anchors, reply-to interfaces, interfaces whose device may differ, config sections compared across nodes |
 | `DRILL_*` | see sample | `drill.sh`: demotion, hold, probe address, DNS name, HTTPS URL |
 
 `kc-ha-status --settings` prints what is in effect on a node; `check.sh` fails if the

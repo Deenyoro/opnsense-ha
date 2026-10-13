@@ -66,5 +66,5 @@ SM=$(st "$M"); SB=$(st "$B")
 echo "  $(g host "$SM"): $(g masters "$SM") MASTER / $(g backups "$SM") BACKUP, demotion $(g demotion "$SM"), egress '$(g egress "$SM")', default $(g default "$SM")"
 echo "  $(g host "$SB"): $(g masters "$SB") MASTER / $(g backups "$SB") BACKUP, demotion $(g demotion "$SB"), egress '$(g egress "$SB")', default $(g default "$SB")"
 echo "== hook log (both nodes, since drill start)"
-for h in "$M" "$B"; do $SSH "$h" "grep -h -E 'kc-ha-egress|kc-ha-dns|kc-ha-services|carp: [0-9]+@[^ ]*: (BACKUP -> MASTER|MASTER -> BACKUP)' /var/log/system/latest.log | awk -v t=\"$(date -u -d @$T0 +%Y-%m-%dT%H:%M 2>/dev/null)\" '1' | tail -8 | cut -c1-150"; done
+for h in "$M" "$B"; do $SSH "$h" "grep -h -E 'kc-ha-egress|kc-ha-dns|kc-ha-services|carp: [0-9]+@[^ ]*: (BACKUP -> MASTER|MASTER -> BACKUP)' \$(ls -t /var/log/system/system_*.log | head -1) | awk -v t=\"$(date -u -d @$T0 +%Y-%m-%dT%H:%M 2>/dev/null)\" '1' | tail -8 | cut -c1-150"; done
 [ "$(g masters "$SM")" -gt 0 ] && [ "$(g backups "$SM")" = 0 ] && [ "$(g masters "$SB")" = 0 ] && echo "DRILL OK: failed over and back" || { echo "DRILL: pair not back in the expected state"; exit 1; }

@@ -85,6 +85,11 @@ CHECK_MASTER_ONLY_ANCHORS=""
 # Logical interfaces (wan, opt3, ...) that must have their interface gateway
 # set, for reply-to. Empty = every interface with an enabled upstream gateway.
 CHECK_REPLY_TO_IFS=""
+# Logical interfaces whose device name is allowed to differ between the nodes
+# (e.g. a passed-through NIC on one node, virtio on the other). Never list an
+# interface that carries an enabled upstream gateway: synced states record
+# route-to <gw>@<device>, and established connections stall on a mismatch.
+CHECK_DEVICES_MAY_DIFFER=""
 # config.xml sections that HA sync does not carry and that must be identical on
 # both nodes (space separated paths), and element names to ignore inside them.
 CHECK_COMPARE_CONFIG="installedpackages/miniupnpd/config"

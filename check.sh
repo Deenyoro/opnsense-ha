@@ -18,7 +18,8 @@ warn() { echo "  warn $*"; }
 
 # One ssh per node; the remote side runs sh (login shell is csh). Prints KEY=VALUE lines.
 collect() {
-    $SSH "$1" "PKGNAME='$pkgname' sh -s" <<'REMOTE'
+    # env, not VAR=value: the login shell on the node is csh
+    $SSH "$1" "env PKGNAME='$pkgname' sh -s" <<'REMOTE'
 echo "hostname=$(hostname)"
 echo "version=$(opnsense-version -v)"
 . /usr/local/sbin/kc-ha-lib 2>/dev/null
@@ -45,7 +46,8 @@ anch=$(echo ${CHECK_MASTER_ONLY_ANCHORS:-$MASTER_ONLY_SERVICES} | tr ' ' '|'); [
 echo "rules=$(pfctl -sr 2>/dev/null | grep -v -E "^(nat-|rdr-)?anchor \"($anch)\"" | wc -l | tr -d ' ') nat=$(pfctl -sn 2>/dev/null | grep -v -E "^(nat-|rdr-)?anchor \"($anch)\"" | wc -l | tr -d ' ')"
 export CHECK_REPLY_TO_IFS CHECK_COMPARE_CONFIG CHECK_COMPARE_IGNORE
 echo "hooks=$(ls /usr/local/etc/rc.syshook.d/carp /usr/local/etc/rc.syshook.d/start | sort | tr '\n' ' ')"
-echo "timedout=$(grep -h -c 'master timed out' /var/log/system/latest.log 2>/dev/null)"
+# newest system log by mtime: the latest.log link can point at another day's file after a boot with a wrong clock
+echo "timedout=$(grep -h -c 'master timed out' "$(ls -t /var/log/system/system_*.log 2>/dev/null | head -1)" 2>/dev/null)"
 /usr/local/bin/python3 - <<'PY'
 import xml.etree.ElementTree as ET
 r=ET.parse("/conf/config.xml").getroot()
@@ -72,6 +74,10 @@ REMOTE
 get() { printf '%s\n' "$2" | sed -n "s|^$1=||p" | head -1; }
 
 A=$(collect "$1"); B=$(collect "$2")
+for n in A B; do
+    eval "D=\$$n"
+    [ -n "$(get hostname "$D")" ] && [ -n "$(get st:role "$D")$(get st:masters "$D")" ] || { echo "could not collect status from one of the nodes (ssh failed, or the kit is not installed there): nothing was checked"; exit 2; }
+done
 for n in A B; do
     eval "D=\$$n"
     host=$(get hostname "$D"); echo "== $host ($(get version "$D")) kc-ha $(get st:version "$D")"
@@ -129,6 +135,11 @@ for k in devices ifgw gateways vips sysctl hasync hooks conf cmpconfig; do   # c
     va=$(get $k "$A"); vb=$(get $k "$B")
     case $k in
         vips) va=$(printf '%s' "$va" | sed 's/skew[0-9]*//g'); vb=$(printf '%s' "$vb" | sed 's/skew[0-9]*//g') ;;   # skew differs by design
+        devices)   # drop the interfaces listed in CHECK_DEVICES_MAY_DIFFER, and compare in name order
+            md=" $(get st:cfg:CHECK_DEVICES_MAY_DIFFER "$A") "
+            flt() { printf '%s\n' "$1" | tr ';' '\n' | grep . | while IFS= read -r e; do case "$md" in *" ${e%%=*} "*) ;; *) echo "$e" ;; esac; done | sort | tr '\n' ';'; }
+            va=$(flt "$va"); vb=$(flt "$vb")
+            for w in $md; do case " $(get wandevs "$A" | tr ' ' '\n' | while read -r d; do printf '%s' "$(get devices "$A")" | tr ';' '\n' | sed -n "s/=$d\$//p"; done | tr '\n' ' ') " in *" $w "*) fail "CHECK_DEVICES_MAY_DIFFER lists $w, which carries an enabled upstream gateway: its device must match" ;; esac; done ;;
     esac
     [ "$va" = "$vb" ] && ok "$k identical on both nodes" || { fail "$k differ (not HA-synced; edit both):"; echo "    A: $va"; echo "    B: $vb"; }
 done
