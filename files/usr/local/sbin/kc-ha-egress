@@ -47,8 +47,11 @@ DRY=0; case "${1:-}" in --dry-run|--show) DRY=1 ;; esac
 if [ "$DRY" = 0 ] && [ -z "${KC_HA_LOCKED:-}" ]; then
     KC_HA_LOCKED=1 exec /usr/bin/lockf -t "$LOCK_TIMEOUT" "$LOCK" /bin/sh "$0" "$@"
 fi
-log() { [ "$DRY" = 1 ] && echo "$*" || /usr/bin/logger -t kc-ha-egress "$*"; }
-run() { [ "$DRY" = 1 ] && echo "+ $*" || "$@"; }
+# fd 3 = the terminal: the route commands below silence stdout/stderr, and the
+# dry run must still show every command it would have executed
+exec 3>&1
+log() { [ "$DRY" = 1 ] && echo "$*" >&3 || /usr/bin/logger -t kc-ha-egress "$*"; }
+run() { [ "$DRY" = 1 ] && echo "+ $*" >&3 || "$@"; }
 
 kc_ha_load
 if [ -z "$VHID" ]; then
