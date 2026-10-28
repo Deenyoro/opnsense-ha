@@ -79,7 +79,8 @@ kc_ha_gw_known() { for _g in $GWS; do [ "${_g%@*}" = "$1" ] && return 0; done; r
 kc_ha_gw_dev() { for _g in $GWS; do [ "${_g%@*}" = "$1" ] && { echo "${_g#*@}"; return 0; }; done; return 1; }
 
 # CARP role of the reference VIP: MASTER, BACKUP, INIT or empty.
-kc_ha_role() { /sbin/ifconfig "$IF" 2>/dev/null | awk -v v="vhid $VHID" '$0 ~ "carp: [A-Z]+ " v {print $2; exit}'; }
+# (the trailing space keeps vhid 1 from matching vhid 10..19 on the same device)
+kc_ha_role() { /sbin/ifconfig "$IF" 2>/dev/null | awk -v v="vhid $VHID " '$0 ~ "carp: [A-Z]+ " v {print $2; exit}'; }
 
 kc_ha_uptime() { echo $(( $(date +%s) - $(/sbin/sysctl -n kern.boottime | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p') )); }
 
