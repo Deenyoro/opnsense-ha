@@ -1,0 +1,47 @@
+#!/bin/sh
+# KC HA: the Tailscale LAN subnet routes must be served by the CARP master.
+# Both nodes advertise the same routes and Tailscale keeps whichever node had
+# them first, so after a failover/failback the backup can still hold them;
+# Tailscale then drops what the master forwards into the tailnet. On the
+# BACKUP, when this node holds the routes and the other node is online in the
+# tailnet, take tailscaled down long enough for Tailscale to move the routes,
+# then bring it back. Runs from the CARP hook and from cron; idempotent;
+# logs to kc-ha-tailscale. Off unless TAILSCALE_NODES is set in kc-ha.conf.
+. /usr/local/sbin/kc-ha-lib
+if [ -z "${KC_HA_LOCKED:-}" ]; then
+    KC_HA_LOCKED=1 exec /usr/bin/lockf -s -t 0 /var/run/kc-ha-tailscale-primary.lock /bin/sh "$0" "$@"
+fi
+TS=/usr/local/bin/tailscale
+[ -n "$TAILSCALE_NODES" ] && [ -x "$TS" ] || exit 0
+kc_ha_load
+[ -n "$IF" ] || exit 0
+[ "$(kc_ha_role)" = BACKUP ] || exit 0
+
+# "<routes held by this node> <online peers holding/advertising the same routes>"
+read held peer <<EOF
+$($TS status --json 2>/dev/null | TAILSCALE_NODES="$TAILSCALE_NODES" /usr/local/bin/python3 -c '
+import json, os, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(0, 0); sys.exit()
+me = d.get("Self", {})
+held = len(me.get("PrimaryRoutes") or [])
+name = (me.get("HostName") or "").lower()
+nodes = {n.lower() for n in os.environ.get("TAILSCALE_NODES", "").split()}
+peer = sum(1 for p in (d.get("Peer") or {}).values()
+           if p.get("Online") and (p.get("HostName") or "").lower() in nodes
+           and (p.get("HostName") or "").lower() != name)
+print(held, peer)')
+EOF
+[ "${held:-0}" -gt 0 ] || exit 0
+if [ "${peer:-0}" -eq 0 ]; then
+    logger -t kc-ha-tailscale "BACKUP holds the Tailscale LAN routes but the master is not online in the tailnet; keeping them"
+    exit 0
+fi
+logger -t kc-ha-tailscale "BACKUP holds the Tailscale LAN routes; handing them to the master"
+/usr/sbin/service tailscaled stop >/dev/null 2>&1
+sleep "$TAILSCALE_HANDOVER_HOLD"
+/usr/sbin/service tailscaled start >/dev/null 2>&1
+logger -t kc-ha-tailscale "BACKUP: tailscaled back up without the primary routes"
+exit 0

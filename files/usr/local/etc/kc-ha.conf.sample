@@ -104,3 +104,13 @@ DRILL_HOLD=25
 DRILL_PROBE_IP=1.1.1.1
 DRILL_DNS_NAME=opnsense.org
 DRILL_HTTPS_URL=https://www.google.com/generate_204
+
+# Tailscale subnet routing on both nodes (os-tailscale advertising the same
+# subnets). Tailscale keeps the routes on whichever node had them first, so after
+# a failover/failback the BACKUP can still hold them and Tailscale then drops what
+# the MASTER forwards. kc-ha-tailscale-primary (carp hook + cron) makes the BACKUP
+# hand them over by stopping tailscaled for TAILSCALE_HANDOVER_HOLD seconds, only
+# when the other node is online in the tailnet. List the Tailscale host names of
+# both nodes; leave empty to turn it off.
+#TAILSCALE_NODES="fw-a fw-b"
+#TAILSCALE_HANDOVER_HOLD=45

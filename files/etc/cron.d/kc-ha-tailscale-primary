@@ -1,0 +1,2 @@
+# kc-ha: the CARP backup must not hold the Tailscale LAN routes (TAILSCALE_NODES in kc-ha.conf)
+*/2 * * * * root /usr/local/sbin/kc-ha-tailscale-primary

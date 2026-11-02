@@ -52,7 +52,7 @@ REMOTE
 ( cd "$here/files" && tar -cf - usr etc ) | $SSH "$host" "tar -xf - -C /"
 $SSH "$host" "sh -s" <<'REMOTE'
 chmod 755 /usr/local/sbin/kc-* /usr/local/etc/rc.syshook.d/carp/*-kc-* /usr/local/etc/rc.syshook.d/start/9*-kc-* /usr/local/etc/rc.syshook.d/start/95-pfsync-maxupd
-chmod 644 /etc/cron.d/kc-ha-master-services /usr/local/etc/kc-ha.conf.sample
+chmod 644 /etc/cron.d/kc-ha-master-services /etc/cron.d/kc-ha-tailscale-primary /usr/local/etc/kc-ha.conf.sample
 conf=/usr/local/etc/kc-ha.conf; m=/usr/local/etc/kc-ha.migrate
 OLD_VHID=""; OLD_JUMBO=""; [ -r $m ] && . $m
 if [ ! -f $conf ]; then

@@ -51,6 +51,7 @@ CrowdSec, Tailscale, interface settings. `install.sh` covers the hook/script par
 | `kc-unbound-master` | Unbound restart on a trusted MASTER event |
 | `kc-ha-master-services` | start/stop `MASTER_ONLY_SERVICES` by role (carp hook, boot, cron every 2 min) |
 | `kc-ha-status` | one-screen status of a node (`--kv` for scripts) |
+| `kc-ha-tailscale-primary` | the BACKUP hands the Tailscale LAN routes to the MASTER (carp hook, cron every 2 min); off unless `TAILSCALE_NODES` is set |
 | `files/usr/local/etc/kc-ha.conf.sample` | every setting with its default and what it does; copied to `kc-ha.conf` once |
 | `install.sh` | idempotent install of plugin + files + version stamp, then live apply and status |
 | `check.sh` | acceptance test of the pair (below) |
@@ -210,8 +211,14 @@ sysctl net.inet.carp.demotion=-240    # relative counter: undo with the negative
   it empty (VIP UUIDs not yet present), sync twice; run `configctl template reload
   OPNsense/Wireguard` on the secondary or `wg0.conf` stays empty; add a static-port
   outbound NAT rule for the tunnel port.
-- Tailscale: with both nodes advertising the same subnets, the control plane may pick the
-  backup as the active subnet router.
+- Tailscale: with both nodes advertising the same subnets, the control plane keeps the
+  routes on whichever node had them first, so after a failover or failback the backup can
+  be the active subnet router and Tailscale drops what the master forwards. Approve the
+  subnet routes for both nodes in the admin console and set `TAILSCALE_NODES` so
+  `kc-ha-tailscale-primary` hands them back to the master. For a 1:1 NAT that sends LAN
+  traffic to a single tailnet host, assign `tailscale0` as an interface on both nodes
+  (same `optN`), allow it, and add an outbound NAT rule on it to that host with the
+  interface address as target, so replies come back to the node that sent them.
 - **Review of the first shared release against the second site** (3 static WANs, WAN2 on
   `vtnet1`, reference VIP vhid 99, 26.1): `97-kc-jumbo-mtu` named `vtnet1` in the script
   and `install.sh` ran it, which there would have re-initialised the active WAN at MTU

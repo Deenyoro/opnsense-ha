@@ -1,0 +1,5 @@
+#!/bin/sh
+# CARP event -> the BACKUP hands the Tailscale LAN routes to the MASTER once the role has settled (SERVICES_HOOK_DELAY)
+. /usr/local/sbin/kc-ha-lib
+( sleep "$SERVICES_HOOK_DELAY"; /usr/local/sbin/kc-ha-tailscale-primary ) >/dev/null 2>&1 &
+exit 0

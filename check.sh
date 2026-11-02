@@ -24,10 +24,10 @@ echo "hostname=$(hostname)"
 echo "version=$(opnsense-version -v)"
 . /usr/local/sbin/kc-ha-lib 2>/dev/null
 echo "pkg=$(pkg query %v "$PKGNAME")"
-for f in /usr/local/sbin/kc-ha-lib /usr/local/sbin/kc-ha-egress /usr/local/sbin/kc-unbound-master /usr/local/sbin/kc-ha-master-services /usr/local/sbin/kc-ha-status \
-         /usr/local/etc/rc.syshook.d/carp/10-kc-ha-egress /usr/local/etc/rc.syshook.d/carp/20-kc-unbound-master /usr/local/etc/rc.syshook.d/carp/30-kc-ha-master-services \
+for f in /usr/local/sbin/kc-ha-lib /usr/local/sbin/kc-ha-egress /usr/local/sbin/kc-unbound-master /usr/local/sbin/kc-ha-master-services /usr/local/sbin/kc-ha-status /usr/local/sbin/kc-ha-tailscale-primary \
+         /usr/local/etc/rc.syshook.d/carp/10-kc-ha-egress /usr/local/etc/rc.syshook.d/carp/20-kc-unbound-master /usr/local/etc/rc.syshook.d/carp/30-kc-ha-master-services /usr/local/etc/rc.syshook.d/carp/60-kc-ha-tailscale \
          /usr/local/etc/rc.syshook.d/start/95-pfsync-maxupd /usr/local/etc/rc.syshook.d/start/96-kc-ha-egress /usr/local/etc/rc.syshook.d/start/97-kc-jumbo-mtu /usr/local/etc/rc.syshook.d/start/98-kc-ha-master-services \
-         /etc/cron.d/kc-ha-master-services /usr/local/etc/kc-ha.conf.sample; do
+         /etc/cron.d/kc-ha-master-services /etc/cron.d/kc-ha-tailscale-primary /usr/local/etc/kc-ha.conf.sample; do
     if [ -f "$f" ]; then echo "md5:$f=$(md5 -q "$f")"; else echo "md5:$f=MISSING"; fi
 done
 echo "conf=$(grep -v '^#' /usr/local/etc/kc-ha.conf 2>/dev/null | grep . | tr '\n' ' ')"
